@@ -38,7 +38,7 @@ function App() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {state.teams.map((team, index) => (
+              {state.teams.sort((a, b) => b.pps - a.pps).map((team, index) => (
                   <TableRow sx={{ bgcolor: '#9ca3af' }}>
                     <TableCell>{index + 1}</TableCell>
                     <TableCell>{team.name}</TableCell>
