@@ -10,6 +10,7 @@ export async function fetchNflTeamData() {
                     name: entry.team.displayName || entry.team.name,
                     wins: entry.stats.find(stat => stat.name === "wins").value,
                     losses: entry.stats.find(stat => stat.name === "losses").value,
+                    ties: entry.stats.find(stat => stat.name === "ties").value,
                     pa: entry.stats.find(stat => stat.name === "pointsAgainst").value,
                     pf: entry.stats.find(stat => stat.name === "pointsFor").value,
                     pd: entry.stats.find(stat => stat.name === "pointDifferential").value,

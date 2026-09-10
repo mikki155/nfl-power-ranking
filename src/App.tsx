@@ -19,7 +19,7 @@ function App() {
     const teams: Team[] = await fetchNflTeamData();
     teams.forEach(team => {
       setState(prevState => ({
-        teams: [...prevState.teams, {...team, pps: ppsCalculate(team.wins, team.losses, team.pd, team.pf, team.pa)}],
+        teams: [...prevState.teams, {...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)}],
       }))
     });
   }
@@ -41,7 +41,7 @@ function App() {
               {state.teams.sort((a, b) => b.pps - a.pps).map((team, index) => (
                   <TableRow sx={{ bgcolor: '#9ca3af' }}>
                     <TableCell>{index + 1}</TableCell>
-                    <TableCell>{team.name}</TableCell>
+                    <TableCell>{team.name + ` (${team.wins}-${team.losses}-${team.ties})`}</TableCell>
                     <TableCell>{team.pps}</TableCell>
                   </TableRow>
               ))}
