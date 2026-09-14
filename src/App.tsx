@@ -46,6 +46,11 @@ function App() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    onClickUpdate();
+  }, [])
+
+  useEffect(() => {
     if (state.teams.length !== 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setUpdateClicked(false);
@@ -54,7 +59,6 @@ function App() {
 
   return (
     <>
-      <Button onClick={() => onClickUpdate()}>Update</Button>
       <section id="center">
         {updateClicked ?
             <CircularProgress />
