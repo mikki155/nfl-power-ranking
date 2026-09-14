@@ -1,7 +1,8 @@
 import {useEffect, useState} from 'react'
 import './App.css'
 import {
-  Button,
+  Box,
+  Button, Card, CardActionArea, CardContent,
   CircularProgress,
   Paper,
   Table,
@@ -9,12 +10,12 @@ import {
   TableCell,
   TableContainer,
   TableHead,
-  TableRow
+  TableRow, Typography
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
 import {fetchNflTeamData} from "./fetch.js";
-import {ppsCalculate, type Team} from "./utils.ts";
+import {ppsCalculate, sendMailNotification, type Team} from "./utils.ts";
 
 type IState = {
   teams: Team[],
@@ -24,7 +25,9 @@ function App() {
   const [state, setState] = useState<IState>({
     teams: [],
   });
-  const [updateClicked, setUpdateClicked] = useState(false) ;
+  const [updateClicked, setUpdateClicked] = useState(false);
+  const [selectedCard, setSelectedCard] = useState(0);
+  const [teamBets, setTeamBets] = useState([] as string[]);
 
   async function onClickUpdate() {
     setUpdateClicked(true);
@@ -35,6 +38,11 @@ function App() {
         teams: [...prevState.teams, {...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)}],
       }))
     });
+  }
+
+  async function onClickCard(index: number, teamName: string) {
+    setSelectedCard(index);
+    setTeamBets([...teamBets, teamName]);
   }
 
   useEffect(() => {
@@ -62,7 +70,7 @@ function App() {
                 </TableHead>
                 <TableBody>
                   {state.teams.sort((a, b) => b.pps - a.pps).map((team, index) => (
-                      <TableRow sx={{ bgcolor: '#9ca3af' }}>
+                      <TableRow key={index + team.name} sx={{ bgcolor: '#9ca3af' }}>
                         <TableCell>{index + 1}</TableCell>
                         <TableCell>{team.name + ` (${team.wins}-${team.losses}-${team.ties})`}</TableCell>
                         <TableCell>{team.pps}</TableCell>
@@ -71,7 +79,39 @@ function App() {
                 </TableBody>
               </Table>
             </TableContainer>}
-
+        <Box
+            sx={{
+              width: '100%',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(min(200px, 100%), 1fr))',
+              gap: 2,
+            }}
+        >
+          {state.teams.length !== 0 && state.teams.map((team, index) => (
+              <Card key={index}>
+                <CardActionArea
+                    onClick={() => onClickCard(index, team.name)}
+                    data-active={selectedCard === index ? '' : undefined}
+                    sx={{
+                      height: '100%',
+                      '&[data-active]': {
+                        backgroundColor: '#9ca3af',
+                      },
+                    }}
+                >
+                  <CardContent sx={{ height: '100%' }}>
+                    <Typography variant="h5" component="div">
+                      {team.name}
+                    </Typography>
+                    <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                      Place bet
+                    </Typography>
+                  </CardContent>
+                </CardActionArea>
+              </Card>
+          ))}
+        </Box>
+        <Button onClick={() => sendMailNotification(teamBets)}>Send notification</Button>
       </section>
     </>
   )
