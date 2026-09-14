@@ -2,7 +2,7 @@ import {useEffect, useState} from 'react'
 import './App.css'
 import {
   Box,
-  Button, Card, CardActionArea, CardContent,
+  Button, Card, CardActions, CardContent,
   CircularProgress,
   Paper,
   Table,
@@ -10,7 +10,7 @@ import {
   TableCell,
   TableContainer,
   TableHead,
-  TableRow, Typography
+  TableRow, TextField, Typography
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
@@ -26,29 +26,23 @@ function App() {
     teams: [],
   });
   const [updateClicked, setUpdateClicked] = useState(false);
-  const [selectedCard, setSelectedCard] = useState(0);
   const [teamBets, setTeamBets] = useState([] as string[]);
+  const [atsInput, setAtsInput] = useState("");
 
   async function onClickUpdate() {
+    if (state.teams.length !== 0) return
     setUpdateClicked(true);
     const teams: Team[] = await fetchNflTeamData();
     teams.forEach(team => {
       setState(prevState => ({
-        ...prevState,
         teams: [...prevState.teams, {...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)}],
       }))
     });
   }
 
-  async function onClickCard(index: number, teamName: string) {
-    setSelectedCard(index);
-    setTeamBets([...teamBets, teamName]);
+  async function onClickCard(teamName: string) {
+    setTeamBets([...teamBets, teamName + " " + atsInput]);
   }
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    onClickUpdate();
-  }, [])
 
   useEffect(() => {
     if (state.teams.length !== 0) {
@@ -60,6 +54,7 @@ function App() {
   return (
     <>
       <section id="center">
+        <Button onClick={() => onClickUpdate()} variant="contained">Update</Button>
         {updateClicked ?
             <CircularProgress />
              :
@@ -86,35 +81,32 @@ function App() {
         <Box
             sx={{
               width: '100%',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(min(200px, 100%), 1fr))',
-              gap: 2,
+              display: 'ruby',
             }}
         >
           {state.teams.length !== 0 && state.teams.map((team, index) => (
               <Card key={index}>
-                <CardActionArea
-                    onClick={() => onClickCard(index, team.name)}
-                    data-active={selectedCard === index ? '' : undefined}
-                    sx={{
-                      height: '100%',
-                      '&[data-active]': {
-                        backgroundColor: '#9ca3af',
-                      },
-                    }}
-                >
-                  <CardContent sx={{ height: '100%' }}>
-                    <Typography variant="h5" component="div">
-                      {team.name}
-                    </Typography>
-                    <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                      Place bet
-                    </Typography>
-                  </CardContent>
-                </CardActionArea>
+                <CardContent sx={{
+                          height: '100%',
+                          backgroundColor: '#9ca3af',
+                }}>
+                  <Typography gutterBottom sx={{ color: 'text.secondary', fontSize: 14 }}>
+                    {team.name}
+                  </Typography>
+                  <TextField onChange={(e) => setAtsInput(e.target.value)}>
+                    ATS:
+                  </TextField>
+                </CardContent>
+                <CardActions sx={{
+                  height: '100%',
+                  backgroundColor: '#9ca3af',
+                }}>
+                  <Button size="small" onClick={() => onClickCard(team.name)}>Place bet</Button>
+                </CardActions>
               </Card>
           ))}
         </Box>
+        <Button onClick={() => setTeamBets([])}>Clear bets</Button>
         <Button onClick={() => sendMailNotification(teamBets)}>Send notification</Button>
       </section>
     </>
