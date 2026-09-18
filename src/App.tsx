@@ -54,6 +54,14 @@ function App() {
   return (
     <>
       <section id="center">
+        <Typography variant="h6">Current score: 11 - 2</Typography>
+        <Typography variant="body1">How to adjust for injuries (per team):</Typography>
+        <Typography variant="body1" sx={{ whiteSpace: "pre-line" }}>
+          {"+40 = low/minimal key injuries \n " +
+              "0 = moderate impact \n " +
+              "-60 to -120 = severe (e.g., long-term QB out, multiple Pro Bowlers missing)"}
+        </Typography>
+
         <Button onClick={() => onClickUpdate()} variant="contained">Update</Button>
         {updateClicked ?
             <CircularProgress />
