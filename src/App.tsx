@@ -22,23 +22,30 @@ import {
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
-import {fetchFinalScores, fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
+import {fetchFinalScores, fetchGameMarkets, fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
+import {LineChart} from "@mui/x-charts/LineChart";
+import {ChartsReferenceLine} from "@mui/x-charts/ChartsReferenceLine";
 import {ppsCalculate, sendMailNotification, type Matchup, type Team} from "./utils.ts";
 import {
   type Bet,
   betId,
+  betProfit,
   buildNotification,
   deleteWeekBets,
   fetchBets,
   formatBet,
   formatMatchup,
+  formatOdds,
   formatOutcome,
   formatWeek,
   gradeBet,
   isSameWeek,
   opponentOf,
+  priceBet,
+  roiOverTime,
   saveBet,
   seasonRecord,
+  type TeamMarket,
   type Week,
 } from "./bets.ts";
 
@@ -132,7 +139,7 @@ function App() {
   const [atsInputs, setAtsInputs] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<Message>({ severity: "success", text: "" });
   const [messageOpen, setMessageOpen] = useState(false);
-  const [view, setView] = useState<"ranking" | "bets" | "history">("ranking");
+  const [view, setView] = useState<"ranking" | "bets" | "roi" | "history">("ranking");
 
   function showMessage(severity: Message["severity"], text: string) {
     setMessage({ severity, text });
@@ -173,17 +180,23 @@ function App() {
     const week = state.week;
     if (!week) return;
     const ats = atsValue(team.name).trim();
+    // An ATS of 0 (or none) means a straight bet on the team, so no spread is stored
+    const line = ats === "" || Number(ats) === 0 ? null : Number(ats);
+    const markets: { home: TeamMarket, away: TeamMarket } | null = await fetchGameMarkets(game.id).catch(() => null);
+    const price = markets ? priceBet(line, game.home === team.name ? markets.home : markets.away) : null;
     const bet: Bet = {
       ...week,
       id: betId(week, team.name),
       gameId: game.id,
+      kickoff: game.date,
       home: game.home,
       away: game.away,
       team: team.name,
       opponent: game.home === team.name ? game.away : game.home,
-      // An ATS of 0 (or none) means a straight bet on the team, so no spread is stored
-      ats: ats === "" || Number(ats) === 0 ? null : Number(ats),
+      ats: line,
       bookSpread: bookSpreadByTeam.get(team.name) ?? null,
+      odds: price?.odds ?? null,
+      oddsSource: price?.oddsSource ?? null,
       placedAt: new Date().toISOString(),
       result: null,
       teamScore: null,
@@ -235,6 +248,13 @@ function App() {
       b.season - a.season || b.seasonType - a.seasonType || b.week - a.week || (a.placedAt ?? "").localeCompare(b.placedAt ?? ""));
   const historySeason = state.week?.season ?? betHistory[0]?.season;
   const record = historySeason === undefined ? null : seasonRecord(bets, historySeason);
+
+  // ROI view: 1 unit per graded bet that has odds
+  const roiPoints = roiOverTime(bets);
+  const latestRoi = roiPoints[roiPoints.length - 1];
+  const settledBets = bets.filter(bet => betProfit(bet) !== null);
+  const estimatedCount = settledBets.filter(bet => bet.oddsSource === "estimate").length;
+  const unpricedCount = bets.filter(bet => bet.result !== null && bet.odds === null).length;
 
   const rankedTeams = [...state.teams].sort((a, b) => b.pps - a.pps);
 
@@ -388,6 +408,7 @@ function App() {
           {([
             { key: "ranking", label: "Power ranking" },
             { key: "bets", label: `Bets (${betCount})` },
+            { key: "roi", label: "ROI" },
             { key: "history", label: "History" },
           ] as const).map(crumb => {
             const active = view === crumb.key;
@@ -452,6 +473,95 @@ function App() {
                 </TableBody>
               </Table>
             </TableContainer>
+             : view === "roi" ?
+            <Paper
+                elevation={0}
+                sx={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  p: 3,
+                  bgcolor: 'var(--bg)',
+                  border: 1,
+                  borderColor: 'var(--border)',
+                  boxShadow: 'var(--shadow)',
+                  textAlign: 'left',
+                }}
+            >
+              <Typography variant="h6" sx={{ color: 'var(--text-h)' }}>Return on investment</Typography>
+              <Typography variant="body2" sx={{ color: 'var(--text)', mb: 3 }}>
+                Cumulative ROI after each game day, staking 1 unit per bet
+              </Typography>
+              {!latestRoi ?
+                  <Typography sx={{ color: 'var(--text)' }}>No graded bets with odds yet.</Typography>
+                  :
+                  <>
+                    <Stack direction="row" useFlexGap sx={{ flexWrap: 'wrap', gap: 4, mb: 3 }}>
+                      <Box>
+                        <Typography variant="body2" sx={{ color: 'var(--text)' }}>ROI</Typography>
+                        <Typography sx={{ color: 'var(--text-h)', fontSize: '3rem', fontWeight: 600, lineHeight: 1.1 }}>
+                          {latestRoi.roi > 0 ? "+" : ""}{latestRoi.roi.toFixed(1)}%
+                        </Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="body2" sx={{ color: 'var(--text)' }}>Profit</Typography>
+                        <Typography sx={{ color: 'var(--text-h)', fontSize: '1.5rem', fontWeight: 600 }}>
+                          {latestRoi.profit > 0 ? "+" : ""}{latestRoi.profit.toFixed(2)} units
+                        </Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="body2" sx={{ color: 'var(--text)' }}>Bets</Typography>
+                        <Typography sx={{ color: 'var(--text-h)', fontSize: '1.5rem', fontWeight: 600 }}>
+                          {latestRoi.staked}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                    <Box sx={{ width: '100%', height: 320 }}>
+                      <LineChart
+                          xAxis={[{
+                            data: roiPoints.map(point => point.date),
+                            scaleType: 'time',
+                            valueFormatter: (date: Date) => date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+                            tickNumber: 6,
+                          }]}
+                          yAxis={[{ valueFormatter: (value: number) => `${value}%` }]}
+                          series={[{
+                            data: roiPoints.map(point => Math.round(point.roi * 10) / 10),
+                            label: 'Cumulative ROI',
+                            color: 'var(--chart-line)',
+                            curve: 'linear',
+                            showMark: true,
+                            valueFormatter: (value: number | null, { dataIndex }) => {
+                              const point = roiPoints[dataIndex];
+                              return `${value! > 0 ? "+" : ""}${value}% · ${point.profit >= 0 ? "+" : ""}${point.profit.toFixed(2)} units over ${point.staked} bets`;
+                            },
+                          }]}
+                          grid={{ horizontal: true }}
+                          hideLegend
+                          margin={{ left: 8, right: 16, top: 16, bottom: 8 }}
+                          sx={{
+                            '& .MuiLineElement-root': { strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' },
+                            '& .MuiMarkElement-root': { stroke: 'var(--bg)', strokeWidth: 2, r: 4, fill: 'var(--chart-line)' },
+                            '& .MuiChartsGrid-line': { stroke: 'var(--border)', strokeWidth: 1 },
+                            '& .MuiChartsAxis-line, & .MuiChartsAxis-tick': { stroke: 'var(--border)' },
+                            '& .MuiChartsAxis-tickLabel': { fill: 'var(--text) !important' },
+                          }}
+                      >
+                        <ChartsReferenceLine
+                            y={0}
+                            lineStyle={{ stroke: 'var(--text)', strokeWidth: 1 }}
+                        />
+                      </LineChart>
+                    </Box>
+                    <Typography variant="body2" sx={{ color: 'var(--text)', mt: 2 }}>
+                      Odds are DraftKings closing lines from ESPN. Straight bets use the moneyline and bets at the
+                      book's spread use its spread price.
+                      {estimatedCount > 0 && ` ${estimatedCount} of ${settledBets.length} bets were at a line the book didn't offer;
+                      their odds are estimated from the probability of covering that line.`}
+                      {unpricedCount > 0 && ` ${unpricedCount} graded ${unpricedCount === 1 ? "bet has" : "bets have"} no odds and ${unpricedCount === 1 ? "is" : "are"} left out.`}
+                      {" "}Each bet's odds are listed in History.
+                    </Typography>
+                  </>}
+            </Paper>
              : view === "history" ?
             <Box sx={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
               {record &&
@@ -477,6 +587,7 @@ function App() {
                           <TableCell sx={{ fontWeight: 'bold' }}>Week</TableCell>
                           <TableCell sx={{ fontWeight: 'bold' }}>Game</TableCell>
                           <TableCell sx={{ fontWeight: 'bold' }}>Bet</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Odds</TableCell>
                           <TableCell sx={{ fontWeight: 'bold' }}>Outcome</TableCell>
                         </TableRow>
                       </TableHead>
@@ -490,6 +601,11 @@ function App() {
                               <TableCell>{formatMatchup(bet) || `vs ${opponentOf(bet) ?? "?"}`}</TableCell>
                               <TableCell sx={{ color: bet.team === null ? 'var(--text) !important' : undefined }}>
                                 {formatBet(bet)}
+                              </TableCell>
+                              <TableCell sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                                {bet.odds === null ? "–" : formatOdds(bet.odds)}
+                                {bet.oddsSource === "estimate" &&
+                                    <Box component="span" sx={{ color: 'var(--text)' }}> (est.)</Box>}
                               </TableCell>
                               <TableCell>
                                 <Chip

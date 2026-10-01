@@ -61,6 +61,29 @@ export async function fetchUpcomingMatchups() {
     return { week, matchups };
 }
 
+// DraftKings odds for one game as { home: TeamMarket, away: TeamMarket } in decimal odds,
+// using the closing line for finished games and the current line for upcoming ones
+export async function fetchGameMarkets(gameId) {
+    const response = await fetch(`https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/${gameId}/competitions/${gameId}/odds`);
+    if (!response.ok) throw new Error(`Odds for game ${gameId}: HTTP ${response.status}`);
+    const items = await response.json().then(data => data?.items ?? []);
+    const odds = items.find(item => item?.provider?.name === "DraftKings") ?? items[0];
+    if (!odds) return null;
+
+    const market = (teamOdds) => {
+        const line = teamOdds?.close ?? teamOdds?.current;
+        const american = line?.pointSpread?.american;
+        // A pick'em line is shown as text rather than 0
+        const spread = american === "PK" || american === "EVEN" ? 0 : Number.parseFloat(american);
+        return {
+            spread: Number.isFinite(spread) ? spread : null,
+            spreadOdds: line?.spread?.decimal ?? null,
+            moneyline: line?.moneyLine?.decimal ?? null,
+        };
+    };
+    return { home: market(odds.homeTeamOdds), away: market(odds.awayTeamOdds) };
+}
+
 // Final scores for one week's finished games, keyed by game id: { [gameId]: { [teamName]: score } }
 export async function fetchFinalScores({ season, seasonType, week }) {
     const params = new URLSearchParams({ dates: season, seasontype: seasonType, week });
