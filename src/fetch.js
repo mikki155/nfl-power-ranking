@@ -8,7 +8,6 @@ export async function fetchNflTeamData() {
             conference?.standings?.entries.forEach((entry) => {
                 teams.push({
                     name: entry.team.displayName || entry.team.name,
-                    logo: entry.team.logos?.[0]?.href,
                     wins: entry.stats.find(stat => stat.name === "wins").value,
                     losses: entry.stats.find(stat => stat.name === "losses").value,
                     ties: entry.stats.find(stat => stat.name === "ties").value,
@@ -59,6 +58,66 @@ export async function fetchUpcomingMatchups() {
         .sort((a, b) => new Date(a.date) - new Date(b.date));
 
     return { week, matchups };
+}
+
+// ESPN's injury report for every team: [{ teamId, team, injuries: [{ athleteId, name, position, status }] }]
+export async function fetchInjuryReport() {
+    const response = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries');
+    if (!response.ok) throw new Error(`Injury report: HTTP ${response.status}`);
+    const teams = await response.json().then(data => data?.injuries ?? []);
+
+    return teams.map(team => ({
+        teamId: team.id,
+        team: team.displayName,
+        injuries: (team.injuries ?? []).map(injury => ({
+            // The athlete id is only given in the player's profile link, e.g. .../player/_/id/4428633/...
+            athleteId: injury.athlete?.links?.[0]?.href?.match(/\/id\/(\d+)/)?.[1] ?? null,
+            name: injury.athlete?.displayName ?? 'Unknown',
+            position: injury.athlete?.position?.abbreviation ?? null,
+            status: injury.status,
+        })),
+    }));
+}
+
+// Athlete ids of a team's starters: everyone ranked first at a spot in any of its depth charts
+export async function fetchStarterIds(teamId, season) {
+    const response = await fetch(`https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/${season}/teams/${teamId}/depthcharts`);
+    if (!response.ok) throw new Error(`Depth chart for team ${teamId}: HTTP ${response.status}`);
+    const charts = await response.json().then(data => data?.items ?? []);
+
+    const starters = new Set();
+    for (const chart of charts) {
+        for (const spot of Object.values(chart.positions ?? {})) {
+            const first = (spot.athletes ?? []).find(athlete => athlete.rank === 1);
+            const id = first?.athlete?.$ref?.match(/\/athletes\/(\d+)/)?.[1];
+            if (id) starters.add(id);
+        }
+    }
+    return [...starters];
+}
+
+// Finished games in the weeks before the given week: [{ gameId, teamIds }]
+export async function fetchRecentGames({ season, seasonType, week }, weeksBack) {
+    const weeks = Array.from({ length: weeksBack }, (_, index) => week - 1 - index).filter(previous => previous >= 1);
+    const scoreboards = await Promise.all(weeks.map(async previous => {
+        const params = new URLSearchParams({ dates: season, seasontype: seasonType, week: previous });
+        const response = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?${params}`);
+        return response.ok ? response.json() : { events: [] };
+    }));
+    return scoreboards.flatMap(scoreboard => (scoreboard?.events ?? [])
+        .filter(event => event?.status?.type?.completed === true)
+        .map(event => ({
+            gameId: event.id,
+            teamIds: (event.competitions?.[0]?.competitors ?? []).map(competitor => competitor.team?.id),
+        })));
+}
+
+// Athlete ids that started one game for a team, from ESPN's per-game roster
+export async function fetchGameStarterIds(gameId, teamId) {
+    const response = await fetch(`https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/${gameId}/competitions/${gameId}/competitors/${teamId}/roster`);
+    if (!response.ok) throw new Error(`Roster for game ${gameId}: HTTP ${response.status}`);
+    const entries = await response.json().then(data => data?.entries ?? []);
+    return entries.filter(entry => entry.starter === true).map(entry => String(entry.playerId));
 }
 
 // DraftKings odds for one game as { home: TeamMarket, away: TeamMarket } in decimal odds,

@@ -17,11 +17,13 @@ import {
   TableCell,
   TableContainer,
   TableHead,
-  TableRow, TextField, Typography
+  TableRow, TextField, Tooltip, Typography
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
-import {fetchFinalScores, fetchGameMarkets, fetchNflTeamData, fetchPolymarketLines, fetchPolymarketOdds, fetchUpcomingMatchups} from "./fetch.js";
+import {fetchFinalScores, fetchGameMarkets, fetchGameStarterIds, fetchInjuryReport, fetchNflTeamData, fetchPolymarketLines, fetchPolymarketOdds, fetchRecentGames, fetchStarterIds, fetchUpcomingMatchups} from "./fetch.js";
+import {estimateInjuryScore, formatInjuryScore, type Injury, type InjuryEstimate} from "./injuries.ts";
+import {teamLogo} from "./logos.ts";
 import {LineChart} from "@mui/x-charts/LineChart";
 import {ChartsReferenceLine} from "@mui/x-charts/ChartsReferenceLine";
 import {ppsCalculate, sendMailNotification, type Matchup, type Team} from "./utils.ts";
@@ -161,6 +163,33 @@ function formatPrice(price: number) {
   return `${Math.round(price * 100)}¢`;
 }
 
+// An injury estimate with the players behind it in a tooltip (focusable, so it also works from the keyboard)
+function renderInjuryScore(estimate: InjuryEstimate | undefined) {
+  if (!estimate) return <span>–</span>;
+  const shown = estimate.contributions.slice(0, 6);
+  const breakdown = (
+      <Box sx={{ p: 0.5 }}>
+        {shown.length === 0 && <div>No injuries that count</div>}
+        {shown.map(player => (
+            <div key={`${player.athleteId}-${player.name}`}>
+              {player.name} ({player.position ?? "?"}, {player.status}{player.starter ? "" : ", backup"})
+            </div>
+        ))}
+        {estimate.contributions.length > shown.length && <div>+{estimate.contributions.length - shown.length} more</div>}
+        <Box sx={{ mt: 0.5, opacity: 0.8 }}>
+          Impact {estimate.impact.toFixed(1)}{estimate.startersKnown ? "" : " · depth chart unavailable, all counted as starters"}
+        </Box>
+      </Box>
+  );
+  return (
+      <Tooltip title={breakdown} arrow>
+        <Box component="span" tabIndex={0} sx={{ textDecoration: 'underline dotted', textUnderlineOffset: '3px', cursor: 'help' }}>
+          {formatInjuryScore(estimate.score)}
+        </Box>
+      </Tooltip>
+  );
+}
+
 // One dropdown row: the line on the left, the away / home prices on the right
 function renderLineOption(label: string, awayPrice: number | undefined, homePrice: number | undefined) {
   return (
@@ -184,6 +213,8 @@ function App() {
   const [bets, setBets] = useState<Bet[]>([]);
   // Polymarket markets per game id (null = no Polymarket event), and the line picked in each game's dropdown
   const [polymarketLines, setPolymarketLines] = useState<Record<string, GameLines | null>>({});
+  // Injury estimate per team name; shown only, not part of the power-ranking score
+  const [injuryEstimates, setInjuryEstimates] = useState<Record<string, InjuryEstimate>>({});
   const [selectedLines, setSelectedLines] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<Message>({ severity: "success", text: "" });
   const [messageOpen, setMessageOpen] = useState(false);
@@ -210,6 +241,28 @@ function App() {
           matchups: schedule?.matchups ?? [],
           week: schedule?.week ?? null,
         });
+
+        // Estimate injuries in the background from ESPN's injury report. A starter is first on the team's depth
+        // chart now, or started one of its last two games (ESPN moves injured players down the depth chart).
+        // Both are needed: game rosters miss e.g. receivers and special teams that only the depth chart lists
+        const season = schedule?.week.season ?? new Date().getFullYear();
+        Promise.all([
+          fetchInjuryReport(),
+          schedule ? fetchRecentGames(schedule.week, 2).catch(() => []) : [],
+        ]).then(async ([report, recentGames]: [{ teamId: string, team: string, injuries: Injury[] }[], { gameId: string, teamIds: string[] }[]]) => {
+          const entries = await Promise.all(report.map(async team => {
+            const [depthChart, ...gameStarters]: (string[] | null)[] = await Promise.all([
+              fetchStarterIds(team.teamId, season).catch(() => null),
+              ...recentGames
+                  .filter(game => game.teamIds.includes(team.teamId))
+                  .map(game => fetchGameStarterIds(game.gameId, team.teamId).catch(() => [])),
+            ]);
+            // Without a depth chart, everyone counts as a starter (the estimate says so)
+            const starters = depthChart && new Set([...depthChart, ...gameStarters.flatMap(ids => ids ?? [])]);
+            return [team.team, estimateInjuryScore(team.injuries, starters)] as const;
+          }));
+          setInjuryEstimates(Object.fromEntries(entries));
+        }).catch(() => {});
 
         // Load each game's Polymarket lines in the background; the dropdowns fill in when they arrive
         const matchups = schedule?.matchups ?? [];
@@ -386,13 +439,16 @@ function App() {
         >
           <CardContent sx={{ flexGrow: 1 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
-              <Avatar src={team.logo} alt={team.name} variant="square" sx={{ width: 40, height: 40 }} />
+              <Avatar src={teamLogo(team.name)} alt={team.name} variant="square" sx={{ width: 40, height: 40 }} />
               <Box sx={{ flexGrow: 1, minWidth: 0 }}>
                 <Typography variant="subtitle1" sx={{ fontWeight: 'bold', lineHeight: 1.2, color: 'var(--text-h)' }}>
                   {team.name}
                 </Typography>
                 <Typography variant="body2" sx={{ color: 'var(--text)' }}>
                   #{rankByName.get(team.name)} · {team.wins}-{team.losses}-{team.ties} · {team.pps}
+                </Typography>
+                <Typography variant="body2" sx={{ color: 'var(--text)' }}>
+                  Injuries: {renderInjuryScore(injuryEstimates[team.name])}
                 </Typography>
               </Box>
               {placedBet && <Chip label={`Bet: ${formatAts(placedBet.ats)}`} color="success" size="small" />}
@@ -443,6 +499,10 @@ function App() {
           {"+40 = low/minimal key injuries \n " +
               "0 = moderate impact \n " +
               "-60 to -120 = severe (e.g., long-term QB out, multiple Pro Bowlers missing)"}
+        </Typography>
+        <Typography variant="body2" sx={{ color: 'var(--text)' }}>
+          The injury estimate is calculated from ESPN's injury report and depth charts, and is not part of the
+          power-ranking score. Hover or focus an estimate to see the players behind it.
         </Typography>
 
         <Breadcrumbs
@@ -501,6 +561,7 @@ function App() {
                     <TableCell sx={{ fontWeight: 'bold' }}>Ranking</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Team</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Power ranking score</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>Injury estimate</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -517,6 +578,9 @@ function App() {
                           </Box>
                         </TableCell>
                         <TableCell>{team.pps}</TableCell>
+                        <TableCell sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                          {renderInjuryScore(injuryEstimates[team.name])}
+                        </TableCell>
                       </TableRow>
                   ))}
                 </TableBody>
