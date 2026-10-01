@@ -22,13 +22,64 @@ import {
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
-import {fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
+import {fetchFinalScores, fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
 import {ppsCalculate, sendMailNotification, type Matchup, type Team} from "./utils.ts";
+import {
+  type Bet,
+  betId,
+  buildNotification,
+  deleteWeekBets,
+  fetchBets,
+  formatBet,
+  formatOutcome,
+  formatWeek,
+  gradeBet,
+  isSameWeek,
+  saveBet,
+  seasonRecord,
+  type Week,
+} from "./bets.ts";
 
 type IState = {
   teams: Team[],
   matchups: Matchup[],
+  week: Week | null,
 };
+
+type Game = Matchup & {
+  homeTeam: Team,
+  awayTeam: Team,
+};
+
+type Message = {
+  severity: "success" | "error",
+  text: string,
+};
+
+// Grades open bets whose games have finished, saves the results, and returns the graded bets by id
+async function gradeOpenBets(bets: Bet[]): Promise<Map<string, Bet>> {
+  const openBets = bets.filter(bet => bet.result === null);
+  const weeks: Week[] = [...new Map(openBets.map(bet => [
+    `${bet.season}-${bet.seasonType}-${bet.week}`,
+    {season: bet.season, seasonType: bet.seasonType, week: bet.week},
+  ])).values()];
+  const graded = new Map<string, Bet>();
+
+  await Promise.all(weeks.map(async week => {
+    const scores: Record<string, Record<string, number>> = await fetchFinalScores(week).catch(() => ({}));
+    for (const bet of openBets.filter(bet => isSameWeek(bet, week))) {
+      const teamScore = scores[bet.gameId]?.[bet.team];
+      const opponentScore = scores[bet.gameId]?.[bet.opponent];
+      if (teamScore === undefined || opponentScore === undefined) continue;
+      const gradedBet = {...bet, teamScore, opponentScore, result: gradeBet(bet.ats, teamScore, opponentScore)};
+      // If saving fails the bet is simply graded again on the next load
+      await saveBet(gradedBet).catch(() => {});
+      graded.set(bet.id, gradedBet);
+    }
+  }));
+
+  return graded;
+}
 
 function formatKickoff(date: string) {
   return new Date(date).toLocaleString(undefined, {
@@ -71,60 +122,120 @@ function App() {
   const [state, setState] = useState<IState>({
     teams: [],
     matchups: [],
+    week: null,
   });
   const [updateClicked, setUpdateClicked] = useState(false);
-  const [teamBets, setTeamBets] = useState([] as string[]);
+  const [bets, setBets] = useState<Bet[]>([]);
   const [atsInputs, setAtsInputs] = useState<Record<string, string>>({});
-  const [notificationResult, setNotificationResult] = useState<"success" | "error">("success");
-  const [notificationOpen, setNotificationOpen] = useState(false);
-  const [view, setView] = useState<"ranking" | "bets">("ranking");
+  const [message, setMessage] = useState<Message>({ severity: "success", text: "" });
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [view, setView] = useState<"ranking" | "bets" | "history">("ranking");
+
+  function showMessage(severity: Message["severity"], text: string) {
+    setMessage({ severity, text });
+    setMessageOpen(true);
+  }
 
   async function onClickUpdate() {
     setUpdateClicked(true);
     try {
-      const [teams, matchups]: [Team[], Matchup[]] = await Promise.all([
+      const [teams, schedule, savedBets]: [Team[], { week: Week, matchups: Matchup[] } | null, Bet[] | null] = await Promise.all([
         fetchNflTeamData(),
         // Without matchups the bets view falls back to an ungrouped list, so don't fail the whole load
-        fetchUpcomingMatchups().catch(() => []),
+        fetchUpcomingMatchups().catch(() => null),
+        fetchBets().catch(() => null),
       ]);
       // Replace rather than append, so refreshing (or a double load in StrictMode) never duplicates teams
       setState({
         teams: teams.map(team => ({...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)})),
-        matchups,
+        matchups: schedule?.matchups ?? [],
+        week: schedule?.week ?? null,
+      });
+
+      if (savedBets === null) {
+        showMessage("error", "Saved bets could not be loaded. Is the app running with npm run dev?");
+        return;
+      }
+      setBets(savedBets);
+      // Grade in the background; merge so bets placed meanwhile aren't lost
+      gradeOpenBets(savedBets).then(graded => {
+        if (graded.size > 0) setBets(current => current.map(bet => graded.get(bet.id) ?? bet));
       });
     } finally {
       setUpdateClicked(false);
     }
   }
 
-  async function onClickCard(teamName: string) {
-    const ats = atsValue(teamName).trim();
-    // An ATS of 0 (or none) means a straight bet on the team, so only the name is stored
-    const hasSpread = ats !== "" && Number(ats) !== 0;
-    setTeamBets([...teamBets, hasSpread ? teamName + " " + ats : teamName]);
+  async function onClickCard(team: Team, game: Game) {
+    const week = state.week;
+    if (!week) return;
+    const ats = atsValue(team.name).trim();
+    const bet: Bet = {
+      ...week,
+      id: betId(week, team.name),
+      gameId: game.id,
+      team: team.name,
+      opponent: game.home === team.name ? game.away : game.home,
+      // An ATS of 0 (or none) means a straight bet on the team, so no spread is stored
+      ats: ats === "" || Number(ats) === 0 ? null : Number(ats),
+      bookSpread: bookSpreadByTeam.get(team.name) ?? null,
+      placedAt: new Date().toISOString(),
+      result: null,
+      teamScore: null,
+      opponentScore: null,
+    };
+    try {
+      await saveBet(bet);
+      setBets(current => [...current.filter(existing => existing.id !== bet.id), bet]);
+    } catch {
+      showMessage("error", "The bet could not be saved. Please try again.");
+    }
+  }
+
+  async function onClickClearBets() {
+    const week = state.week;
+    if (!week) return;
+    try {
+      await deleteWeekBets(week);
+      setBets(current => current.filter(bet => !isSameWeek(bet, week)));
+      setAtsInputs({});
+    } catch {
+      showMessage("error", "The bets could not be cleared. Please try again.");
+    }
   }
 
   async function onClickSendNotification() {
-    if (teamBets.length === 0) return;
+    if (!state.week || currentWeekBets.length === 0) return;
+    const { subject, text } = buildNotification(state.week, bets);
     try {
-      const sent = await sendMailNotification(teamBets);
-      setNotificationResult(sent ? "success" : "error");
+      const sent = await sendMailNotification(subject, text);
+      showMessage(sent ? "success" : "error", sent
+          ? "Notification sent successfully!"
+          : "The notification could not be sent. Please try again.");
     } catch {
-      setNotificationResult("error");
+      showMessage("error", "The notification could not be sent. Please try again.");
     }
-    setNotificationOpen(true);
   }
+
+  const currentWeek = state.week;
+  const currentWeekBets = currentWeek ? bets.filter(bet => isSameWeek(bet, currentWeek)) : [];
+  const betCount = currentWeekBets.length;
 
   function hasBet(teamName: string) {
-    return teamBets.some(bet => bet === teamName || bet.startsWith(teamName + " "));
+    return currentWeekBets.some(bet => bet.team === teamName);
   }
 
+  // Newest week first, for the history view
+  const betHistory = [...bets].sort((a, b) =>
+      b.season - a.season || b.seasonType - a.seasonType || b.week - a.week || a.placedAt.localeCompare(b.placedAt));
+  const historySeason = state.week?.season ?? betHistory[0]?.season;
+  const record = historySeason === undefined ? null : seasonRecord(bets, historySeason);
+
   const rankedTeams = [...state.teams].sort((a, b) => b.pps - a.pps);
-  const betCount = new Set(teamBets).size;
 
   const rankByName = new Map(rankedTeams.map((team, index) => [team.name, index + 1]));
   const teamByName = new Map(rankedTeams.map(team => [team.name, team]));
-  const games = state.matchups.flatMap(matchup => {
+  const games: Game[] = state.matchups.flatMap(matchup => {
     const home = teamByName.get(matchup.home);
     const away = teamByName.get(matchup.away);
     return home && away ? [{...matchup, homeTeam: home, awayTeam: away}] : [];
@@ -142,7 +253,9 @@ function App() {
     return bookSpread === undefined ? "" : String(bookSpread);
   }
 
-  function renderTeamCard(team: Team, spread?: number | null) {
+  // Teams without a game this week get a card without a spread and can't be bet on
+  function renderTeamCard(team: Team, game?: Game) {
+    const spread = game ? bookSpreadByTeam.get(team.name) ?? null : undefined;
     const ats = atsValue(team.name);
     const atsError = ats !== "" && !isValidAts(ats);
     const betPlaced = hasBet(team.name);
@@ -230,10 +343,10 @@ function App() {
             <Button
                 variant="contained"
                 fullWidth
-                disabled={atsError}
-                onClick={() => onClickCard(team.name)}
+                disabled={atsError || !game || !state.week}
+                onClick={() => game && onClickCard(team, game)}
             >
-              Place bet
+              {!game ? "No game to bet on" : betPlaced ? "Update bet" : "Place bet"}
             </Button>
           </CardActions>
         </Card>
@@ -271,6 +384,7 @@ function App() {
           {([
             { key: "ranking", label: "Power ranking" },
             { key: "bets", label: `Bets (${betCount})` },
+            { key: "history", label: "History" },
           ] as const).map(crumb => {
             const active = view === crumb.key;
             return (
@@ -334,6 +448,57 @@ function App() {
                 </TableBody>
               </Table>
             </TableContainer>
+             : view === "history" ?
+            <Box sx={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {record &&
+                  <Typography variant="h6" sx={{ color: 'var(--text-h)', alignSelf: 'flex-start' }}>
+                    {historySeason} record: {record.wins}-{record.losses}-{record.pushes} (W-L-P)
+                  </Typography>}
+              {betHistory.length === 0 ?
+                  <Typography sx={{ color: 'var(--text)' }}>No bets placed yet.</Typography>
+                  :
+                  <TableContainer
+                      component={Paper}
+                      elevation={0}
+                      sx={{ bgcolor: 'var(--bg)', border: 1, borderColor: 'var(--border)', boxShadow: 'var(--shadow)' }}
+                  >
+                    <Table
+                        sx={{
+                          minWidth: 650,
+                          '& .MuiTableCell-root': { color: 'var(--text-h)', borderColor: 'var(--border)' },
+                        }}
+                    >
+                      <TableHead>
+                        <TableRow sx={{ bgcolor: 'var(--code-bg)' }}>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Week</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Bet</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Opponent</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Outcome</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {betHistory.map((bet, index) => (
+                            <TableRow
+                                key={bet.id}
+                                sx={{ bgcolor: index % 2 === 0 ? 'var(--bg)' : 'var(--code-bg)' }}
+                            >
+                              <TableCell>{formatWeek(bet)}, {bet.season}</TableCell>
+                              <TableCell>{formatBet(bet)}</TableCell>
+                              <TableCell>{bet.opponent}</TableCell>
+                              <TableCell>
+                                <Chip
+                                    size="small"
+                                    label={formatOutcome(bet)}
+                                    variant={bet.result === null ? "outlined" : "filled"}
+                                    color={bet.result === "win" ? "success" : bet.result === "loss" ? "error" : "default"}
+                                />
+                              </TableCell>
+                            </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>}
+            </Box>
              :
             <Box sx={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
               <Paper
@@ -351,6 +516,7 @@ function App() {
                   }}
               >
                 <Typography sx={{ color: 'var(--text-h)' }}>
+                  {state.week ? `${formatWeek(state.week)}: ` : ""}
                   {betCount === 0 ? "No bets placed yet" : `${betCount} ${betCount === 1 ? "bet" : "bets"} placed`}
                 </Typography>
                 <Stack direction="row" spacing={1}>
@@ -358,10 +524,7 @@ function App() {
                       variant="outlined"
                       color="error"
                       disabled={betCount === 0}
-                      onClick={() => {
-                        setTeamBets([]);
-                        setAtsInputs({});
-                      }}
+                      onClick={() => onClickClearBets()}
                   >
                     Clear bets
                   </Button>
@@ -405,7 +568,7 @@ function App() {
                                   gap: 1.5,
                                 }}
                             >
-                              {renderTeamCard(game.awayTeam, game.homeSpread === null ? null : -game.homeSpread)}
+                              {renderTeamCard(game.awayTeam, game)}
                               <Box
                                   aria-label="versus"
                                   sx={{
@@ -425,7 +588,7 @@ function App() {
                               >
                                 VS
                               </Box>
-                              {renderTeamCard(game.homeTeam, game.homeSpread)}
+                              {renderTeamCard(game.homeTeam, game)}
                             </Box>
                           </Paper>
                       ))}
@@ -442,19 +605,14 @@ function App() {
                   </>}
             </Box>}
         <Snackbar
-            open={notificationOpen}
+            open={messageOpen}
             autoHideDuration={4000}
-            onClose={() => setNotificationOpen(false)}
+            onClose={() => setMessageOpen(false)}
             anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         >
-          {notificationResult === "error" ?
-              <Alert severity="error" variant="filled" onClose={() => setNotificationOpen(false)}>
-                The notification could not be sent. Please try again.
-              </Alert>
-              :
-              <Alert severity="success" variant="filled" onClose={() => setNotificationOpen(false)}>
-                Notification sent successfully!
-              </Alert>}
+          <Alert severity={message.severity} variant="filled" onClose={() => setMessageOpen(false)}>
+            {message.text}
+          </Alert>
         </Snackbar>
       </section>
     </>

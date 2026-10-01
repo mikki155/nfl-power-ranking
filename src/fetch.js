@@ -24,12 +24,18 @@ export async function fetchNflTeamData() {
     return teams;
 }
 
-// This week's games that haven't kicked off yet, ordered by kickoff time
+// The current week, plus its games that haven't kicked off yet, ordered by kickoff time
 export async function fetchUpcomingMatchups() {
     const response = await fetch('https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard');
-    const events = await response.json().then(data => data?.events ?? []);
+    const data = await response.json();
+    const events = data?.events ?? [];
+    const week = {
+        season: data?.season?.year,
+        seasonType: data?.season?.type,
+        week: data?.week?.number,
+    };
 
-    return events
+    const matchups = events
         .filter(event => event?.status?.type?.state === "pre")
         .map(event => {
             const competitors = event.competitions?.[0]?.competitors ?? [];
@@ -51,4 +57,25 @@ export async function fetchUpcomingMatchups() {
         })
         .filter(matchup => matchup.home && matchup.away)
         .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    return { week, matchups };
+}
+
+// Final scores for one week's finished games, keyed by game id: { [gameId]: { [teamName]: score } }
+export async function fetchFinalScores({ season, seasonType, week }) {
+    const params = new URLSearchParams({ dates: season, seasontype: seasonType, week });
+    const response = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?${params}`);
+    const events = await response.json().then(data => data?.events ?? []);
+    const scores = {};
+
+    events
+        .filter(event => event?.status?.type?.completed === true)
+        .forEach(event => {
+            scores[event.id] = {};
+            (event.competitions?.[0]?.competitors ?? []).forEach(competitor => {
+                scores[event.id][competitor.team.displayName] = Number(competitor.score);
+            });
+        });
+
+    return scores;
 }
