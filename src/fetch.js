@@ -8,6 +8,7 @@ export async function fetchNflTeamData() {
             conference?.standings?.entries.forEach((entry) => {
                 teams.push({
                     name: entry.team.displayName || entry.team.name,
+                    logo: entry.team.logos?.[0]?.href,
                     wins: entry.stats.find(stat => stat.name === "wins").value,
                     losses: entry.stats.find(stat => stat.name === "losses").value,
                     ties: entry.stats.find(stat => stat.name === "ties").value,
