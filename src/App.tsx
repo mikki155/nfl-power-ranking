@@ -1,6 +1,7 @@
 import {useEffect, useState} from 'react'
 import './App.css'
 import {
+  Alert,
   Avatar,
   Box,
   Button, Card, CardActions, CardContent,
@@ -9,6 +10,7 @@ import {
   IconButton,
   InputAdornment,
   Paper,
+  Snackbar,
   Table,
   TableBody,
   TableCell,
@@ -47,6 +49,8 @@ function App() {
   const [updateClicked, setUpdateClicked] = useState(false);
   const [teamBets, setTeamBets] = useState([] as string[]);
   const [atsInputs, setAtsInputs] = useState<Record<string, string>>({});
+  const [notificationResult, setNotificationResult] = useState<"success" | "error">("success");
+  const [notificationOpen, setNotificationOpen] = useState(false);
 
   async function onClickUpdate() {
     if (state.teams.length !== 0) return
@@ -64,6 +68,17 @@ function App() {
     // An ATS of 0 (or none) means a straight bet on the team, so only the name is stored
     const hasSpread = ats !== undefined && ats !== "" && Number(ats) !== 0;
     setTeamBets([...teamBets, hasSpread ? teamName + " " + ats : teamName]);
+  }
+
+  async function onClickSendNotification() {
+    if (teamBets.length === 0) return;
+    try {
+      const sent = await sendMailNotification(teamBets);
+      setNotificationResult(sent ? "success" : "error");
+    } catch {
+      setNotificationResult("error");
+    }
+    setNotificationOpen(true);
   }
 
   function hasBet(teamName: string) {
@@ -237,7 +252,22 @@ function App() {
           setTeamBets([]);
           setAtsInputs({});
         }}>Clear bets</Button>
-        <Button onClick={() => sendMailNotification(teamBets)}>Send notification</Button>
+        <Button onClick={() => onClickSendNotification()}>Send notification</Button>
+        <Snackbar
+            open={notificationOpen}
+            autoHideDuration={4000}
+            onClose={() => setNotificationOpen(false)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          {notificationResult === "error" ?
+              <Alert severity="error" variant="filled" onClose={() => setNotificationOpen(false)}>
+                The notification could not be sent. Please try again.
+              </Alert>
+              :
+              <Alert severity="success" variant="filled" onClose={() => setNotificationOpen(false)}>
+                Notification sent successfully!
+              </Alert>}
+        </Snackbar>
       </section>
     </>
   )
