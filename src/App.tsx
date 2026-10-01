@@ -31,10 +31,12 @@ import {
   deleteWeekBets,
   fetchBets,
   formatBet,
+  formatMatchup,
   formatOutcome,
   formatWeek,
   gradeBet,
   isSameWeek,
+  opponentOf,
   saveBet,
   seasonRecord,
   type Week,
@@ -58,7 +60,7 @@ type Message = {
 
 // Grades open bets whose games have finished, saves the results, and returns the graded bets by id
 async function gradeOpenBets(bets: Bet[]): Promise<Map<string, Bet>> {
-  const openBets = bets.filter(bet => bet.result === null);
+  const openBets = bets.filter(bet => bet.result === null && bet.team !== null);
   const weeks: Week[] = [...new Map(openBets.map(bet => [
     `${bet.season}-${bet.seasonType}-${bet.week}`,
     {season: bet.season, seasonType: bet.seasonType, week: bet.week},
@@ -68,8 +70,9 @@ async function gradeOpenBets(bets: Bet[]): Promise<Map<string, Bet>> {
   await Promise.all(weeks.map(async week => {
     const scores: Record<string, Record<string, number>> = await fetchFinalScores(week).catch(() => ({}));
     for (const bet of openBets.filter(bet => isSameWeek(bet, week))) {
-      const teamScore = scores[bet.gameId]?.[bet.team];
-      const opponentScore = scores[bet.gameId]?.[bet.opponent];
+      const opponent = opponentOf(bet);
+      const teamScore = bet.team === null ? undefined : scores[bet.gameId]?.[bet.team];
+      const opponentScore = opponent === null ? undefined : scores[bet.gameId]?.[opponent];
       if (teamScore === undefined || opponentScore === undefined) continue;
       const gradedBet = {...bet, teamScore, opponentScore, result: gradeBet(bet.ats, teamScore, opponentScore)};
       // If saving fails the bet is simply graded again on the next load
@@ -174,6 +177,8 @@ function App() {
       ...week,
       id: betId(week, team.name),
       gameId: game.id,
+      home: game.home,
+      away: game.away,
       team: team.name,
       opponent: game.home === team.name ? game.away : game.home,
       // An ATS of 0 (or none) means a straight bet on the team, so no spread is stored
@@ -227,7 +232,7 @@ function App() {
 
   // Newest week first, for the history view
   const betHistory = [...bets].sort((a, b) =>
-      b.season - a.season || b.seasonType - a.seasonType || b.week - a.week || a.placedAt.localeCompare(b.placedAt));
+      b.season - a.season || b.seasonType - a.seasonType || b.week - a.week || (a.placedAt ?? "").localeCompare(b.placedAt ?? ""));
   const historySeason = state.week?.season ?? betHistory[0]?.season;
   const record = historySeason === undefined ? null : seasonRecord(bets, historySeason);
 
@@ -361,7 +366,6 @@ function App() {
   return (
     <>
       <section id="center">
-        <Typography variant="h6">Current score: 17 - 9</Typography>
         <Typography variant="body1">How to adjust for injuries (per team):</Typography>
         <Typography variant="body1" sx={{ whiteSpace: "pre-line" }}>
           {"+40 = low/minimal key injuries \n " +
@@ -471,8 +475,8 @@ function App() {
                       <TableHead>
                         <TableRow sx={{ bgcolor: 'var(--code-bg)' }}>
                           <TableCell sx={{ fontWeight: 'bold' }}>Week</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Game</TableCell>
                           <TableCell sx={{ fontWeight: 'bold' }}>Bet</TableCell>
-                          <TableCell sx={{ fontWeight: 'bold' }}>Opponent</TableCell>
                           <TableCell sx={{ fontWeight: 'bold' }}>Outcome</TableCell>
                         </TableRow>
                       </TableHead>
@@ -483,8 +487,10 @@ function App() {
                                 sx={{ bgcolor: index % 2 === 0 ? 'var(--bg)' : 'var(--code-bg)' }}
                             >
                               <TableCell>{formatWeek(bet)}, {bet.season}</TableCell>
-                              <TableCell>{formatBet(bet)}</TableCell>
-                              <TableCell>{bet.opponent}</TableCell>
+                              <TableCell>{formatMatchup(bet) || `vs ${opponentOf(bet) ?? "?"}`}</TableCell>
+                              <TableCell sx={{ color: bet.team === null ? 'var(--text) !important' : undefined }}>
+                                {formatBet(bet)}
+                              </TableCell>
                               <TableCell>
                                 <Chip
                                     size="small"

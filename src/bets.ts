@@ -10,11 +10,13 @@ export type Week = {
 export type Bet = Week & {
   id: string;
   gameId: string;
-  team: string;
-  opponent: string;
+  home: string | null;
+  away: string | null;
+  team: string | null; // null = game imported without a pick yet; never graded
+  opponent: string | null;
   ats: number | null; // null = straight bet (team must win outright)
   bookSpread: number | null;
-  placedAt: string;
+  placedAt: string | null;
   result: BetResult | null; // null until the game is final
   teamScore: number | null;
   opponentScore: number | null;
@@ -46,7 +48,19 @@ export function formatWeek(week: Week) {
   return `Week ${week.week}`;
 }
 
+// The other team in the game; falls back to home/away for bets entered by hand without an opponent
+export function opponentOf(bet: Bet) {
+  if (bet.opponent !== null) return bet.opponent;
+  if (bet.team === null) return null;
+  return bet.team === bet.home ? bet.away : bet.home;
+}
+
+export function formatMatchup(bet: Bet) {
+  return bet.home && bet.away ? `${bet.away} @ ${bet.home}` : "";
+}
+
 export function formatBet(bet: Bet) {
+  if (bet.team === null) return "No pick yet";
   if (bet.ats === null) return bet.team;
   return `${bet.team} ${bet.ats > 0 ? "+" : ""}${bet.ats}`;
 }
@@ -68,11 +82,11 @@ export function seasonRecord(bets: Bet[], season: number) {
 
 // The email lists only this week's bets, each with its outcome so far
 export function buildNotification(week: Week, allBets: Bet[]) {
-  const weekBets = allBets.filter(bet => isSameWeek(bet, week));
+  const weekBets = allBets.filter(bet => isSameWeek(bet, week) && bet.team !== null);
   const record = seasonRecord(allBets, week.season);
   const lines = [
     `${formatWeek(week)} bets (${week.season}):`,
-    ...weekBets.map(bet => `• ${formatBet(bet)} vs ${bet.opponent}: ${formatOutcome(bet)}`),
+    ...weekBets.map(bet => `• ${formatBet(bet)} vs ${opponentOf(bet)}: ${formatOutcome(bet)}`),
     "",
     `Season record: ${record.wins}-${record.losses}-${record.pushes} (W-L-P)`,
   ];
