@@ -27,7 +27,7 @@ function App() {
   });
   const [updateClicked, setUpdateClicked] = useState(false);
   const [teamBets, setTeamBets] = useState([] as string[]);
-  const [atsInput, setAtsInput] = useState("");
+  const [atsInputs, setAtsInputs] = useState<Record<string, string>>({});
 
   async function onClickUpdate() {
     if (state.teams.length !== 0) return
@@ -41,7 +41,7 @@ function App() {
   }
 
   async function onClickCard(teamName: string) {
-    setTeamBets([...teamBets, teamName + " " + atsInput]);
+    setTeamBets([...teamBets, teamName + " " + (atsInputs[teamName] ?? "")]);
   }
 
   useEffect(() => {
@@ -54,7 +54,7 @@ function App() {
   return (
     <>
       <section id="center">
-        <Typography variant="h6">Current score: 11 - 2</Typography>
+        <Typography variant="h6">Current score: 17 - 9</Typography>
         <Typography variant="body1">How to adjust for injuries (per team):</Typography>
         <Typography variant="body1" sx={{ whiteSpace: "pre-line" }}>
           {"+40 = low/minimal key injuries \n " +
@@ -101,9 +101,11 @@ function App() {
                   <Typography gutterBottom sx={{ color: 'text.secondary', fontSize: 14 }}>
                     {team.name}
                   </Typography>
-                  <TextField onChange={(e) => setAtsInput(e.target.value)}>
-                    ATS:
-                  </TextField>
+                  <TextField
+                      label="ATS"
+                      value={atsInputs[team.name] ?? ""}
+                      onChange={(e) => setAtsInputs(prev => ({...prev, [team.name]: e.target.value}))}
+                  />
                 </CardContent>
                 <CardActions sx={{
                   height: '100%',
@@ -114,7 +116,10 @@ function App() {
               </Card>
           ))}
         </Box>
-        <Button onClick={() => setTeamBets([])}>Clear bets</Button>
+        <Button onClick={() => {
+          setTeamBets([]);
+          setAtsInputs({});
+        }}>Clear bets</Button>
         <Button onClick={() => sendMailNotification(teamBets)}>Send notification</Button>
       </section>
     </>
