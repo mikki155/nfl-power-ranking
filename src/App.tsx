@@ -180,7 +180,7 @@ function App() {
     matchups: [],
     week: null,
   });
-  const [updateClicked, setUpdateClicked] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [bets, setBets] = useState<Bet[]>([]);
   // Polymarket markets per game id (null = no Polymarket event), and the line picked in each game's dropdown
   const [polymarketLines, setPolymarketLines] = useState<Record<string, GameLines | null>>({});
@@ -194,42 +194,49 @@ function App() {
     setMessageOpen(true);
   }
 
-  async function onClickUpdate() {
-    setUpdateClicked(true);
-    try {
-      const [teams, schedule, savedBets]: [Team[], { week: Week, matchups: Matchup[] } | null, Bet[] | null] = await Promise.all([
-        fetchNflTeamData(),
-        // Without matchups the bets view falls back to an ungrouped list, so don't fail the whole load
-        fetchUpcomingMatchups().catch(() => null),
-        fetchBets().catch(() => null),
-      ]);
-      // Replace rather than append, so refreshing (or a double load in StrictMode) never duplicates teams
-      setState({
-        teams: teams.map(team => ({...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)})),
-        matchups: schedule?.matchups ?? [],
-        week: schedule?.week ?? null,
-      });
+  // Everything is loaded once when the page opens; refresh the browser to get new data
+  useEffect(() => {
+    async function load() {
+      try {
+        const [teams, schedule, savedBets]: [Team[], { week: Week, matchups: Matchup[] } | null, Bet[] | null] = await Promise.all([
+          fetchNflTeamData(),
+          // Without matchups the bets view falls back to an ungrouped list, so don't fail the whole load
+          fetchUpcomingMatchups().catch(() => null),
+          fetchBets().catch(() => null),
+        ]);
+        // Replace rather than append, so the double load in StrictMode never duplicates teams
+        setState({
+          teams: teams.map(team => ({...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)})),
+          matchups: schedule?.matchups ?? [],
+          week: schedule?.week ?? null,
+        });
 
-      // Load each game's Polymarket lines in the background; the dropdowns fill in when they arrive
-      const matchups = schedule?.matchups ?? [];
-      Promise.all(matchups.map(async matchup => [
-        matchup.id,
-        await fetchPolymarketLines({ home: matchup.home, away: matchup.away, kickoff: matchup.date }).catch(() => null),
-      ] as const)).then(entries => setPolymarketLines(Object.fromEntries(entries)));
+        // Load each game's Polymarket lines in the background; the dropdowns fill in when they arrive
+        const matchups = schedule?.matchups ?? [];
+        Promise.all(matchups.map(async matchup => [
+          matchup.id,
+          await fetchPolymarketLines({ home: matchup.home, away: matchup.away, kickoff: matchup.date }).catch(() => null),
+        ] as const)).then(entries => setPolymarketLines(Object.fromEntries(entries)));
 
-      if (savedBets === null) {
-        showMessage("error", "Saved bets could not be loaded. Is the app running with npm run dev?");
-        return;
+        if (savedBets === null) {
+          setMessage({ severity: "error", text: "Saved bets could not be loaded. Is the app running with npm run dev?" });
+          setMessageOpen(true);
+          return;
+        }
+        setBets(savedBets);
+        // Grade in the background; merge so bets placed meanwhile aren't lost
+        gradeOpenBets(savedBets).then(graded => {
+          if (graded.size > 0) setBets(current => current.map(bet => graded.get(bet.id) ?? bet));
+        });
+      } catch {
+        setMessage({ severity: "error", text: "The NFL standings could not be loaded. Refresh the page to try again." });
+        setMessageOpen(true);
+      } finally {
+        setLoading(false);
       }
-      setBets(savedBets);
-      // Grade in the background; merge so bets placed meanwhile aren't lost
-      gradeOpenBets(savedBets).then(graded => {
-        if (graded.size > 0) setBets(current => current.map(bet => graded.get(bet.id) ?? bet));
-      });
-    } finally {
-      setUpdateClicked(false);
     }
-  }
+    load();
+  }, []);
 
   async function onClickCard(team: Team, game: Game) {
     const week = state.week;
@@ -239,7 +246,7 @@ function App() {
     // Odds are looked up when the notification is sent, not here
     const bet: Bet = {
       ...week,
-      id: betId(week, team.name),
+      id: betId(week, game.id),
       gameId: game.id,
       kickoff: game.date,
       home: game.home,
@@ -362,6 +369,8 @@ function App() {
         : { ats: null, price: null };
     const placedBet = currentWeekBets.find(bet => bet.team === team.name);
     const betPlaced = placedBet !== undefined;
+    // Either team's button replaces the game's existing bet
+    const gameHasBet = game !== undefined && currentWeekBets.some(bet => bet.gameId === game.id);
     return (
         <Card
             key={team.name}
@@ -419,17 +428,12 @@ function App() {
                 disabled={!game || !state.week}
                 onClick={() => game && onClickCard(team, game)}
             >
-              {!game ? "No game to bet on" : `${betPlaced ? "Update bet" : "Bet"}: ${nickname(team.name)} ${formatAts(ats)}`}
+              {!game ? "No game to bet on" : `${gameHasBet ? "Update bet" : "Bet"}: ${nickname(team.name)} ${formatAts(ats)}`}
             </Button>
           </CardActions>
         </Card>
     );
   }
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    onClickUpdate();
-  }, [])
 
   return (
     <>
@@ -441,9 +445,6 @@ function App() {
               "-60 to -120 = severe (e.g., long-term QB out, multiple Pro Bowlers missing)"}
         </Typography>
 
-        <Button onClick={() => onClickUpdate()} variant="contained" disabled={updateClicked}>
-          {updateClicked ? "Updating…" : "Update"}
-        </Button>
         <Breadcrumbs
             aria-label="Sections"
             separator="›"
@@ -481,7 +482,7 @@ function App() {
             );
           })}
         </Breadcrumbs>
-        {updateClicked && state.teams.length === 0 ?
+        {loading ?
             <CircularProgress />
              : view === "ranking" ?
             <TableContainer

@@ -113,9 +113,10 @@ export type Bet = Week & {
   opponentScore: number | null;
 };
 
-// One bet per team per week, so betting on a team again replaces the earlier bet
-export function betId(week: Week, team: string) {
-  return `${week.season}-${week.seasonType}-${week.week}-${team}`;
+// One bet per game, so any new bet on a game (either team, any line) replaces the earlier one,
+// including after the notification was sent
+export function betId(week: Week, gameId: string) {
+  return `${week.season}-${week.seasonType}-${week.week}-game-${gameId}`;
 }
 
 export function isSameWeek(a: Week, b: Week) {
