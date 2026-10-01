@@ -172,13 +172,13 @@ export function seasonRecord(bets: Bet[], season: number) {
   };
 }
 
-// The email lists only this week's bets, each with its outcome so far
+// The email lists only this week's bets, one line per game with just the team bet on and its line
 export function buildNotification(week: Week, allBets: Bet[]) {
   const weekBets = allBets.filter(bet => isSameWeek(bet, week) && bet.team !== null);
   const record = seasonRecord(allBets, week.season);
   const lines = [
     `${formatWeek(week)} bets (${week.season}):`,
-    ...weekBets.map(bet => `• ${formatBet(bet)} vs ${opponentOf(bet)}: ${formatOutcome(bet)}`),
+    ...weekBets.map(bet => `• ${formatBet(bet)}`),
     "",
     `Season record: ${record.wins}-${record.losses}-${record.pushes} (W-L-P)`,
   ];

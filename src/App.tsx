@@ -1,4 +1,4 @@
-import {useEffect, useState} from 'react'
+import {useEffect, useRef, useState} from 'react'
 import './App.css'
 import {
   Alert,
@@ -134,12 +134,13 @@ function spreadKey(spread: Spread) {
   return `${spread.favourite}|${spread.line}`;
 }
 
-// A team's side of the selected market: the favourite gives the points, the other team gets them
-function teamLine(lines: GameLines | null | undefined, key: string, team: string) {
-  if (key === MONEYLINE) return { ats: null, price: lines?.moneyline?.[team] ?? null };
+// A team's side of the selected market: the favourite gives the points, the other team gets them.
+// null is the moneyline (a straight bet)
+function teamLine(lines: GameLines | null | undefined, key: string, team: string): number | null {
+  if (key === MONEYLINE) return null;
   const spread = lines?.spreads.find(candidate => spreadKey(candidate) === key);
-  if (!spread) return { ats: null, price: null };
-  return { ats: spread.favourite === team ? spread.line : -spread.line, price: spread.prices[team] ?? null };
+  if (!spread) return null;
+  return spread.favourite === team ? spread.line : -spread.line;
 }
 
 // The market's main line is the spread priced closest to 50/50
@@ -210,6 +211,9 @@ function App() {
     week: null,
   });
   const [loading, setLoading] = useState(true);
+  // The ref blocks a second send immediately; the state shows it on the button
+  const sendingRef = useRef(false);
+  const [sending, setSending] = useState(false);
   const [bets, setBets] = useState<Bet[]>([]);
   // Polymarket markets per game id (null = no Polymarket event), and the line picked in each game's dropdown
   const [polymarketLines, setPolymarketLines] = useState<Record<string, GameLines | null>>({});
@@ -295,7 +299,7 @@ function App() {
     const week = state.week;
     if (!week) return;
     // The team's side of the line selected for this game; null is a moneyline (straight) bet
-    const line = teamLine(polymarketLines[game.id], selectedLineKey(game), team.name).ats;
+    const line = teamLine(polymarketLines[game.id], selectedLineKey(game), team.name);
     // Odds are looked up when the notification is sent, not here
     const bet: Bet = {
       ...week,
@@ -337,30 +341,34 @@ function App() {
   }
 
   async function onClickSendNotification() {
-    if (!state.week || currentWeekBets.length === 0) return;
-
-    // Price this week's bets that don't have odds yet, at the moment the notification goes out
-    const sentAt = new Date().toISOString();
-    const priced = new Map<string, Bet>();
-    await Promise.all(currentWeekBets.filter(bet => bet.odds === null && bet.team !== null).map(async bet => {
-      const price = await fetchBetPrice(bet, sentAt);
-      if (!price) return;
-      const pricedBet = { ...bet, ...price };
-      // If saving fails, the bet is priced again on the next send
-      await saveBet(pricedBet).catch(() => {});
-      priced.set(bet.id, pricedBet);
-    }));
-    const allBets = bets.map(bet => priced.get(bet.id) ?? bet);
-    if (priced.size > 0) setBets(current => current.map(bet => priced.get(bet.id) ?? bet));
-
-    const { subject, text } = buildNotification(state.week, allBets);
+    // Ignore presses while a send is running, so a double-click can't price, save or email twice
+    if (!state.week || currentWeekBets.length === 0 || sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
     try {
-      const sent = await sendMailNotification(subject, text);
+      // Price this week's bets that don't have odds yet, at the moment the notification goes out.
+      // Bets priced by an earlier send keep their odds, so sending again writes nothing new
+      const sentAt = new Date().toISOString();
+      const priced = new Map<string, Bet>();
+      await Promise.all(currentWeekBets.filter(bet => bet.odds === null && bet.team !== null).map(async bet => {
+        const price = await fetchBetPrice(bet, sentAt);
+        if (!price) return;
+        const pricedBet = { ...bet, ...price };
+        // Updates the bet's existing row; if saving fails, the bet is priced again on the next send
+        await saveBet(pricedBet).catch(() => {});
+        priced.set(bet.id, pricedBet);
+      }));
+      const allBets = bets.map(bet => priced.get(bet.id) ?? bet);
+      if (priced.size > 0) setBets(current => current.map(bet => priced.get(bet.id) ?? bet));
+
+      const { subject, text } = buildNotification(state.week, allBets);
+      const sent = await sendMailNotification(subject, text).catch(() => false);
       showMessage(sent ? "success" : "error", sent
           ? "Notification sent successfully!"
           : "The notification could not be sent. Please try again.");
-    } catch {
-      showMessage("error", "The notification could not be sent. Please try again.");
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   }
 
@@ -416,10 +424,8 @@ function App() {
 
   // Teams without a game this week get a card without a spread and can't be bet on
   function renderTeamCard(team: Team, game?: Game) {
-    const linesLoaded = game !== undefined && game.id in polymarketLines;
-    const { ats, price } = game
-        ? teamLine(polymarketLines[game.id], selectedLineKey(game), team.name)
-        : { ats: null, price: null };
+    // This team's side of the line picked in the game's dropdown, named on the bet button
+    const ats = game ? teamLine(polymarketLines[game.id], selectedLineKey(game), team.name) : null;
     const placedBet = currentWeekBets.find(bet => bet.team === team.name);
     const betPlaced = placedBet !== undefined;
     // Either team's button replaces the game's existing bet
@@ -431,53 +437,59 @@ function App() {
             sx={{
               display: 'flex',
               flexDirection: 'column',
+              textAlign: 'left',
               bgcolor: 'var(--code-bg)',
               boxShadow: 'var(--shadow)',
               border: 2,
               borderColor: betPlaced ? 'success.main' : 'var(--border)',
             }}
         >
-          <CardContent sx={{ flexGrow: 1 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
-              <Avatar src={teamLogo(team.name)} alt={team.name} variant="square" sx={{ width: 40, height: 40 }} />
-              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 'bold', lineHeight: 1.2, color: 'var(--text-h)' }}>
+          <CardContent sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: 1.5, p: 2 }}>
+            {/* Header: logo, name, and rank with record */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <Avatar src={teamLogo(team.name)} alt="" variant="square" sx={{ width: 40, height: 40, flexShrink: 0 }} />
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 'bold', lineHeight: 1.25, color: 'var(--text-h)' }}>
                   {team.name}
                 </Typography>
-                <Typography variant="body2" sx={{ color: 'var(--text)' }}>
-                  #{rankByName.get(team.name)} · {team.wins}-{team.losses}-{team.ties} · {team.pps}
-                </Typography>
-                <Typography variant="body2" sx={{ color: 'var(--text)' }}>
-                  Injuries: {renderInjuryScore(injuryEstimates[team.name])}
+                <Typography variant="body2" sx={{ color: 'var(--text)', mt: 0.25 }}>
+                  #{rankByName.get(team.name)} · {team.wins}-{team.losses}-{team.ties}
                 </Typography>
               </Box>
-              {placedBet && <Chip label={`Bet: ${formatAts(placedBet.ats)}`} color="success" size="small" />}
             </Box>
-            {game &&
-                // This team's side of the line picked in the game's dropdown
-                <Box
-                    sx={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'baseline',
-                      gap: 1,
-                      px: 1.5,
-                      py: 1,
-                      border: 1,
-                      borderColor: 'var(--border)',
-                      borderRadius: 1,
-                      bgcolor: 'var(--bg)',
-                    }}
-                >
-                  <Typography sx={{ fontWeight: 'bold', color: 'var(--text-h)' }}>
-                    {ats === null ? "Moneyline" : formatAts(ats)}
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
-                    {!linesLoaded ? "Loading…" : price === null ? "No price" : `${formatPrice(price)} · ${formatOdds(1 / price)}`}
-                  </Typography>
-                </Box>}
+
+            {/* Details: labels on the left, values on the right */}
+            <Box
+                component="dl"
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto',
+                  columnGap: 2,
+                  rowGap: 0.75,
+                  m: 0,
+                  pt: 1.5,
+                  borderTop: 1,
+                  borderColor: 'var(--border)',
+                  typography: 'body2',
+                  '& dt': { color: 'var(--text)' },
+                  '& dd': { m: 0, color: 'var(--text-h)', fontWeight: 600, textAlign: 'right', fontVariantNumeric: 'tabular-nums' },
+                }}
+            >
+              <dt>Power score</dt>
+              <dd>{team.pps}</dd>
+              <dt>Injuries</dt>
+              <dd>{renderInjuryScore(injuryEstimates[team.name])}</dd>
+            </Box>
+
+            {placedBet &&
+                <Chip
+                    label={`Bet placed: ${formatAts(placedBet.ats)}`}
+                    color="success"
+                    size="small"
+                    sx={{ alignSelf: 'flex-start' }}
+                />}
           </CardContent>
-          <CardActions sx={{ px: 2, pb: 2 }}>
+          <CardActions sx={{ px: 2, pt: 0, pb: 2 }}>
             <Button
                 variant="contained"
                 fullWidth
@@ -494,12 +506,6 @@ function App() {
   return (
     <>
       <section id="center">
-        <Typography variant="body1">How to adjust for injuries (per team):</Typography>
-        <Typography variant="body1" sx={{ whiteSpace: "pre-line" }}>
-          {"+40 = low/minimal key injuries \n " +
-              "0 = moderate impact \n " +
-              "-60 to -120 = severe (e.g., long-term QB out, multiple Pro Bowlers missing)"}
-        </Typography>
         <Typography variant="body2" sx={{ color: 'var(--text)' }}>
           The injury estimate is calculated from ESPN's injury report and depth charts, and is not part of the
           power-ranking score. Hover or focus an estimate to see the players behind it.
@@ -766,8 +772,8 @@ function App() {
                   >
                     Clear bets
                   </Button>
-                  <Button variant="contained" disabled={betCount === 0} onClick={() => onClickSendNotification()}>
-                    Send notification
+                  <Button variant="contained" disabled={betCount === 0 || sending} onClick={() => onClickSendNotification()}>
+                    {sending ? "Sending…" : "Send notification"}
                   </Button>
                 </Stack>
               </Paper>

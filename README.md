@@ -30,13 +30,13 @@ Teams without an upcoming game this week are listed separately and can't be bet 
 
 - **Polymarket line:** each game has a dropdown with the moneyline and every open spread Polymarket offers,
   with live prices. It defaults to the main line (the spread priced closest to 50/50).
-- **Placing a bet:** each team's card shows its side of the selected line and price, e.g. `+2.5 · 48¢ · −108`,
-  and a button such as **Bet: Browns +2.5**. There is one bet per game: betting again on a game, on either team
-  or any line, replaces the earlier bet.
+- **Placing a bet:** each team's card has a button with its side of the selected line, such as
+  **Bet: Browns +2.5**. There is one bet per game: betting again on a game, on either team or any line,
+  replaces the earlier bet.
 - **Clear bets** removes this week's bets.
 - **Send notification** first looks up the price of this week's bets that don't have one yet (Polymarket at
-  that moment, falling back to DraftKings odds), saves it, then emails this week's bets with their outcome so
-  far and the season record. A success or error message confirms the result.
+  that moment, falling back to DraftKings odds), saves it, then emails this week's bets (the team and line for
+  each game) and the season record. A success or error message confirms the result.
 
 ### ROI
 
