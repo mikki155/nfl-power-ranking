@@ -8,8 +8,7 @@ import {
   Button, Card, CardActions, CardContent,
   Chip,
   CircularProgress,
-  IconButton,
-  InputAdornment,
+  MenuItem,
   Paper,
   Snackbar,
   Stack,
@@ -22,7 +21,7 @@ import {
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
-import {fetchFinalScores, fetchGameMarkets, fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
+import {fetchFinalScores, fetchGameMarkets, fetchNflTeamData, fetchPolymarketLines, fetchPolymarketOdds, fetchUpcomingMatchups} from "./fetch.js";
 import {LineChart} from "@mui/x-charts/LineChart";
 import {ChartsReferenceLine} from "@mui/x-charts/ChartsReferenceLine";
 import {ppsCalculate, sendMailNotification, type Matchup, type Team} from "./utils.ts";
@@ -91,6 +90,21 @@ async function gradeOpenBets(bets: Bet[]): Promise<Map<string, Bet>> {
   return graded;
 }
 
+// A bet's price at a given time: Polymarket first, then DraftKings (estimated for lines DraftKings didn't offer)
+async function fetchBetPrice(bet: Bet, at: string): Promise<Pick<Bet, "odds" | "oddsSource" | "oddsProvider"> | null> {
+  if (bet.team === null || bet.home === null || bet.away === null || bet.kickoff === null) return null;
+  const polymarket: { odds: number } | null = await fetchPolymarketOdds({
+    home: bet.home, away: bet.away, kickoff: bet.kickoff, team: bet.team, ats: bet.ats, at,
+  }).catch(() => null);
+  if (polymarket) {
+    return { odds: polymarket.odds, oddsSource: bet.ats === null ? "moneyline" : "spread", oddsProvider: "polymarket" };
+  }
+
+  const markets: { home: TeamMarket, away: TeamMarket } | null = await fetchGameMarkets(bet.gameId).catch(() => null);
+  const draftKings = markets && priceBet(bet.ats, bet.team === bet.home ? markets.home : markets.away);
+  return draftKings && { ...draftKings, oddsProvider: "draftkings" };
+}
+
 function formatKickoff(date: string) {
   return new Date(date).toLocaleString(undefined, {
     weekday: 'short',
@@ -101,11 +115,6 @@ function formatKickoff(date: string) {
   });
 }
 
-function formatSpread(spread: number) {
-  if (spread === 0) return "PK";
-  return spread > 0 ? `+${spread}` : String(spread);
-}
-
 const CARD_GRID_SX = {
   width: '100%',
   display: 'grid',
@@ -113,19 +122,56 @@ const CARD_GRID_SX = {
   gap: 2,
 };
 
-// ATS spreads move in half-point increments, e.g. -3.5, +7, 0
-function isValidAts(value: string | undefined) {
-  if (value === undefined || value.trim() === "") return false;
-  const ats = Number(value);
-  return Number.isFinite(ats) && Number.isInteger(ats * 2);
+// A game's open Polymarket markets with current prices by team name (see fetchPolymarketLines)
+type Spread = { favourite: string, line: number, prices: Record<string, number> };
+type GameLines = { moneyline: Record<string, number> | null, spreads: Spread[] };
+
+// Dropdown keys: the moneyline, or one spread market named after its favourite
+const MONEYLINE = "moneyline";
+function spreadKey(spread: Spread) {
+  return `${spread.favourite}|${spread.line}`;
 }
 
-// Moves the ATS value by one half-point step, snapping invalid values to the nearest half point
-function stepAts(value: string | undefined, direction: 1 | -1) {
-  const current = Number(value);
-  const base = Number.isFinite(current) ? Math.round(current * 2) / 2 : 0;
-  const next = base + direction * 0.5;
-  return next === 0 ? "0" : String(next);
+// A team's side of the selected market: the favourite gives the points, the other team gets them
+function teamLine(lines: GameLines | null | undefined, key: string, team: string) {
+  if (key === MONEYLINE) return { ats: null, price: lines?.moneyline?.[team] ?? null };
+  const spread = lines?.spreads.find(candidate => spreadKey(candidate) === key);
+  if (!spread) return { ats: null, price: null };
+  return { ats: spread.favourite === team ? spread.line : -spread.line, price: spread.prices[team] ?? null };
+}
+
+// The market's main line is the spread priced closest to 50/50
+function defaultLineKey(lines: GameLines | null | undefined) {
+  if (!lines?.spreads.length) return MONEYLINE;
+  const main = lines.spreads.reduce((best, spread) =>
+      Math.abs((spread.prices[spread.favourite] ?? 0) - 0.5) < Math.abs((best.prices[best.favourite] ?? 0) - 0.5) ? spread : best);
+  return spreadKey(main);
+}
+
+function nickname(team: string) {
+  return team.split(" ").pop() ?? team;
+}
+
+function formatAts(ats: number | null) {
+  if (ats === null) return "ML";
+  return ats > 0 ? `+${ats}` : String(ats);
+}
+
+function formatPrice(price: number) {
+  return `${Math.round(price * 100)}¢`;
+}
+
+// One dropdown row: the line on the left, the away / home prices on the right
+function renderLineOption(label: string, awayPrice: number | undefined, homePrice: number | undefined) {
+  return (
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, width: '100%' }}>
+        <span>{label}</span>
+        {awayPrice !== undefined && homePrice !== undefined &&
+            <Box component="span" sx={{ color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
+              {formatPrice(awayPrice)} / {formatPrice(homePrice)}
+            </Box>}
+      </Box>
+  );
 }
 
 function App() {
@@ -136,7 +182,9 @@ function App() {
   });
   const [updateClicked, setUpdateClicked] = useState(false);
   const [bets, setBets] = useState<Bet[]>([]);
-  const [atsInputs, setAtsInputs] = useState<Record<string, string>>({});
+  // Polymarket markets per game id (null = no Polymarket event), and the line picked in each game's dropdown
+  const [polymarketLines, setPolymarketLines] = useState<Record<string, GameLines | null>>({});
+  const [selectedLines, setSelectedLines] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<Message>({ severity: "success", text: "" });
   const [messageOpen, setMessageOpen] = useState(false);
   const [view, setView] = useState<"ranking" | "bets" | "roi" | "history">("ranking");
@@ -162,6 +210,13 @@ function App() {
         week: schedule?.week ?? null,
       });
 
+      // Load each game's Polymarket lines in the background; the dropdowns fill in when they arrive
+      const matchups = schedule?.matchups ?? [];
+      Promise.all(matchups.map(async matchup => [
+        matchup.id,
+        await fetchPolymarketLines({ home: matchup.home, away: matchup.away, kickoff: matchup.date }).catch(() => null),
+      ] as const)).then(entries => setPolymarketLines(Object.fromEntries(entries)));
+
       if (savedBets === null) {
         showMessage("error", "Saved bets could not be loaded. Is the app running with npm run dev?");
         return;
@@ -179,11 +234,9 @@ function App() {
   async function onClickCard(team: Team, game: Game) {
     const week = state.week;
     if (!week) return;
-    const ats = atsValue(team.name).trim();
-    // An ATS of 0 (or none) means a straight bet on the team, so no spread is stored
-    const line = ats === "" || Number(ats) === 0 ? null : Number(ats);
-    const markets: { home: TeamMarket, away: TeamMarket } | null = await fetchGameMarkets(game.id).catch(() => null);
-    const price = markets ? priceBet(line, game.home === team.name ? markets.home : markets.away) : null;
+    // The team's side of the line selected for this game; null is a moneyline (straight) bet
+    const line = teamLine(polymarketLines[game.id], selectedLineKey(game), team.name).ats;
+    // Odds are looked up when the notification is sent, not here
     const bet: Bet = {
       ...week,
       id: betId(week, team.name),
@@ -195,8 +248,9 @@ function App() {
       opponent: game.home === team.name ? game.away : game.home,
       ats: line,
       bookSpread: bookSpreadByTeam.get(team.name) ?? null,
-      odds: price?.odds ?? null,
-      oddsSource: price?.oddsSource ?? null,
+      odds: null,
+      oddsSource: null,
+      oddsProvider: null,
       placedAt: new Date().toISOString(),
       result: null,
       teamScore: null,
@@ -216,7 +270,7 @@ function App() {
     try {
       await deleteWeekBets(week);
       setBets(current => current.filter(bet => !isSameWeek(bet, week)));
-      setAtsInputs({});
+      setSelectedLines({});
     } catch {
       showMessage("error", "The bets could not be cleared. Please try again.");
     }
@@ -224,7 +278,22 @@ function App() {
 
   async function onClickSendNotification() {
     if (!state.week || currentWeekBets.length === 0) return;
-    const { subject, text } = buildNotification(state.week, bets);
+
+    // Price this week's bets that don't have odds yet, at the moment the notification goes out
+    const sentAt = new Date().toISOString();
+    const priced = new Map<string, Bet>();
+    await Promise.all(currentWeekBets.filter(bet => bet.odds === null && bet.team !== null).map(async bet => {
+      const price = await fetchBetPrice(bet, sentAt);
+      if (!price) return;
+      const pricedBet = { ...bet, ...price };
+      // If saving fails, the bet is priced again on the next send
+      await saveBet(pricedBet).catch(() => {});
+      priced.set(bet.id, pricedBet);
+    }));
+    const allBets = bets.map(bet => priced.get(bet.id) ?? bet);
+    if (priced.size > 0) setBets(current => current.map(bet => priced.get(bet.id) ?? bet));
+
+    const { subject, text } = buildNotification(state.week, allBets);
     try {
       const sent = await sendMailNotification(subject, text);
       showMessage(sent ? "success" : "error", sent
@@ -239,10 +308,6 @@ function App() {
   const currentWeekBets = currentWeek ? bets.filter(bet => isSameWeek(bet, currentWeek)) : [];
   const betCount = currentWeekBets.length;
 
-  function hasBet(teamName: string) {
-    return currentWeekBets.some(bet => bet.team === teamName);
-  }
-
   // Newest week first, for the history view
   const betHistory = [...bets].sort((a, b) =>
       b.season - a.season || b.seasonType - a.seasonType || b.week - a.week || (a.placedAt ?? "").localeCompare(b.placedAt ?? ""));
@@ -254,6 +319,7 @@ function App() {
   const latestRoi = roiPoints[roiPoints.length - 1];
   const settledBets = bets.filter(bet => betProfit(bet) !== null);
   const estimatedCount = settledBets.filter(bet => bet.oddsSource === "estimate").length;
+  const draftKingsCount = settledBets.filter(bet => bet.oddsProvider !== "polymarket").length;
   const unpricedCount = bets.filter(bet => bet.result !== null && bet.odds === null).length;
 
   const rankedTeams = [...state.teams].sort((a, b) => b.pps - a.pps);
@@ -268,22 +334,34 @@ function App() {
   const teamsInGames = new Set(games.flatMap(game => [game.home, game.away]));
   const teamsWithoutGame = rankedTeams.filter(team => !teamsInGames.has(team.name));
 
-  // Each team's line from the sportsbook, used as the ATS value until the user enters their own
+  // Each team's DraftKings line, saved with each bet for reference
   const bookSpreadByTeam = new Map<string, number>(games.flatMap(game =>
       game.homeSpread === null ? [] : [[game.home, game.homeSpread], [game.away, -game.homeSpread]]));
 
-  function atsValue(teamName: string) {
-    if (atsInputs[teamName] !== undefined) return atsInputs[teamName];
-    const bookSpread = bookSpreadByTeam.get(teamName);
-    return bookSpread === undefined ? "" : String(bookSpread);
+  // The dropdown's selection for a game, falling back to the main line if nothing (still valid) is picked
+  function selectedLineKey(game: Game) {
+    const lines = polymarketLines[game.id];
+    const selected = selectedLines[game.id];
+    const valid = selected === MONEYLINE || lines?.spreads.some(spread => spreadKey(spread) === selected);
+    return selected !== undefined && valid ? selected : defaultLineKey(lines);
+  }
+
+  // Spreads from the away team's point of view, biggest away favourite first
+  function lineOptions(game: Game) {
+    const awayLine = (spread: Spread) => spread.favourite === game.away ? spread.line : -spread.line;
+    return [...(polymarketLines[game.id]?.spreads ?? [])]
+        .sort((a, b) => awayLine(a) - awayLine(b))
+        .map(spread => ({ key: spreadKey(spread), awayLine: awayLine(spread), prices: spread.prices }));
   }
 
   // Teams without a game this week get a card without a spread and can't be bet on
   function renderTeamCard(team: Team, game?: Game) {
-    const spread = game ? bookSpreadByTeam.get(team.name) ?? null : undefined;
-    const ats = atsValue(team.name);
-    const atsError = ats !== "" && !isValidAts(ats);
-    const betPlaced = hasBet(team.name);
+    const linesLoaded = game !== undefined && game.id in polymarketLines;
+    const { ats, price } = game
+        ? teamLine(polymarketLines[game.id], selectedLineKey(game), team.name)
+        : { ats: null, price: null };
+    const placedBet = currentWeekBets.find(bet => bet.team === team.name);
+    const betPlaced = placedBet !== undefined;
     return (
         <Card
             key={team.name}
@@ -307,71 +385,41 @@ function App() {
                 <Typography variant="body2" sx={{ color: 'var(--text)' }}>
                   #{rankByName.get(team.name)} · {team.wins}-{team.losses}-{team.ties} · {team.pps}
                 </Typography>
-                {spread !== undefined &&
-                    <Typography variant="body2" sx={{ color: 'var(--text-h)', fontWeight: 'bold' }}>
-                      Spread: {spread === null ? "N/A" : formatSpread(spread)}
-                    </Typography>}
               </Box>
-              {betPlaced && <Chip label="Bet placed" color="success" size="small" />}
+              {placedBet && <Chip label={`Bet: ${formatAts(placedBet.ats)}`} color="success" size="small" />}
             </Box>
-            <TextField
-                label="ATS"
-                type="number"
-                size="small"
-                fullWidth
-                value={ats}
-                error={atsError}
-                helperText={atsError ? "Use steps of 0.5" : " "}
-                onChange={(e) => setAtsInputs(prev => ({...prev, [team.name]: e.target.value}))}
-                sx={{
-                  // Hide the browser's tiny spinners; the −/+ buttons replace them
-                  '& input[type=number]': { MozAppearance: 'textfield', textAlign: 'center' },
-                  '& input[type=number]::-webkit-inner-spin-button, & input[type=number]::-webkit-outer-spin-button': {
-                    WebkitAppearance: 'none',
-                    margin: 0,
-                  },
-                }}
-                slotProps={{
-                  htmlInput: { step: 0.5, inputMode: 'decimal' },
-                  input: {
-                    startAdornment: (
-                        <InputAdornment position="start">
-                          <IconButton
-                              aria-label={`Decrease ATS for ${team.name}`}
-                              edge="start"
-                              color="primary"
-                              sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
-                              onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(ats, -1)}))}
-                          >
-                            −
-                          </IconButton>
-                        </InputAdornment>
-                    ),
-                    endAdornment: (
-                        <InputAdornment position="end">
-                          <IconButton
-                              aria-label={`Increase ATS for ${team.name}`}
-                              edge="end"
-                              color="primary"
-                              sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
-                              onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(ats, 1)}))}
-                          >
-                            +
-                          </IconButton>
-                        </InputAdornment>
-                    ),
-                  },
-                }}
-            />
+            {game &&
+                // This team's side of the line picked in the game's dropdown
+                <Box
+                    sx={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'baseline',
+                      gap: 1,
+                      px: 1.5,
+                      py: 1,
+                      border: 1,
+                      borderColor: 'var(--border)',
+                      borderRadius: 1,
+                      bgcolor: 'var(--bg)',
+                    }}
+                >
+                  <Typography sx={{ fontWeight: 'bold', color: 'var(--text-h)' }}>
+                    {ats === null ? "Moneyline" : formatAts(ats)}
+                  </Typography>
+                  <Typography variant="body2" sx={{ color: 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
+                    {!linesLoaded ? "Loading…" : price === null ? "No price" : `${formatPrice(price)} · ${formatOdds(1 / price)}`}
+                  </Typography>
+                </Box>}
           </CardContent>
           <CardActions sx={{ px: 2, pb: 2 }}>
             <Button
                 variant="contained"
                 fullWidth
-                disabled={atsError || !game || !state.week}
+                disabled={!game || !state.week}
                 onClick={() => game && onClickCard(team, game)}
             >
-              {!game ? "No game to bet on" : betPlaced ? "Update bet" : "Place bet"}
+              {!game ? "No game to bet on" : `${betPlaced ? "Update bet" : "Bet"}: ${nickname(team.name)} ${formatAts(ats)}`}
             </Button>
           </CardActions>
         </Card>
@@ -553,10 +601,11 @@ function App() {
                       </LineChart>
                     </Box>
                     <Typography variant="body2" sx={{ color: 'var(--text)', mt: 2 }}>
-                      Odds are DraftKings closing lines from ESPN. Straight bets use the moneyline and bets at the
-                      book's spread use its spread price.
-                      {estimatedCount > 0 && ` ${estimatedCount} of ${settledBets.length} bets were at a line the book didn't offer;
-                      their odds are estimated from the probability of covering that line.`}
+                      Odds are Polymarket prices when each bet was placed (decimal odds = 1 / price), for the
+                      moneyline or the exact spread bet.
+                      {draftKingsCount > 0 && ` ${draftKingsCount} of ${settledBets.length} bets had no Polymarket market and use
+                      DraftKings closing odds instead${estimatedCount > 0 ? `, ${estimatedCount} of them estimated from the
+                      probability of covering a line DraftKings didn't offer` : ""}.`}
                       {unpricedCount > 0 && ` ${unpricedCount} graded ${unpricedCount === 1 ? "bet has" : "bets have"} no odds and ${unpricedCount === 1 ? "is" : "are"} left out.`}
                       {" "}Each bet's odds are listed in History.
                     </Typography>
@@ -604,8 +653,10 @@ function App() {
                               </TableCell>
                               <TableCell sx={{ fontVariantNumeric: 'tabular-nums' }}>
                                 {bet.odds === null ? "–" : formatOdds(bet.odds)}
-                                {bet.oddsSource === "estimate" &&
-                                    <Box component="span" sx={{ color: 'var(--text)' }}> (est.)</Box>}
+                                {bet.odds !== null && bet.oddsProvider !== "polymarket" &&
+                                    <Box component="span" sx={{ color: 'var(--text)' }}>
+                                      {bet.oddsSource === "estimate" ? " (DraftKings est.)" : " (DraftKings)"}
+                                    </Box>}
                               </TableCell>
                               <TableCell>
                                 <Chip
@@ -680,8 +731,36 @@ function App() {
                               {formatKickoff(game.date)} · {game.neutralSite
                                   ? `Neutral site${game.venueCity ? ` (${game.venueCity})` : ""}`
                                   : `at ${game.home}`}
-                              {game.oddsProvider && ` · Odds: ${game.oddsProvider}`}
                             </Typography>
+                            <TextField
+                                select
+                                size="small"
+                                fullWidth
+                                label="Polymarket line"
+                                value={selectedLineKey(game)}
+                                onChange={(e) => setSelectedLines(prev => ({...prev, [game.id]: e.target.value}))}
+                                disabled={!(game.id in polymarketLines)}
+                                helperText={game.id in polymarketLines && polymarketLines[game.id] === null
+                                    ? "No Polymarket market found for this game" : undefined}
+                                sx={{ mb: 1.5, textAlign: 'left' }}
+                            >
+                              <MenuItem value={MONEYLINE}>
+                                {renderLineOption(
+                                    "Moneyline",
+                                    polymarketLines[game.id]?.moneyline?.[game.away],
+                                    polymarketLines[game.id]?.moneyline?.[game.home],
+                                )}
+                              </MenuItem>
+                              {lineOptions(game).map(option => (
+                                  <MenuItem key={option.key} value={option.key}>
+                                    {renderLineOption(
+                                        `${nickname(game.away)} ${formatAts(option.awayLine)} / ${nickname(game.home)} ${formatAts(-option.awayLine)}`,
+                                        option.prices[game.away],
+                                        option.prices[game.home],
+                                    )}
+                                  </MenuItem>
+                              ))}
+                            </TextField>
                             <Box
                                 sx={{
                                   display: 'grid',

@@ -4,6 +4,9 @@ export type BetResult = "win" | "loss" | "push";
 // estimate = bet at a line the book didn't offer, priced from the probability of covering it
 export type OddsSource = "moneyline" | "spread" | "estimate";
 
+// Polymarket is where bets are placed; DraftKings (via ESPN) is the fallback when Polymarket has no market
+export type OddsProvider = "polymarket" | "draftkings";
+
 // One team's side of the sportsbook market for a game, as decimal odds
 export type TeamMarket = {
   spread: number | null;       // e.g. 3 for +3
@@ -103,6 +106,7 @@ export type Bet = Week & {
   bookSpread: number | null;
   odds: number | null; // decimal price, e.g. 1.91 for -110; null when no odds could be found
   oddsSource: OddsSource | null;
+  oddsProvider: OddsProvider | null;
   placedAt: string | null;
   result: BetResult | null; // null until the game is final
   teamScore: number | null;

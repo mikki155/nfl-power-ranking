@@ -84,6 +84,107 @@ export async function fetchGameMarkets(gameId) {
     return { home: market(odds.homeTeamOdds), away: market(odds.awayTeamOdds) };
 }
 
+// Polymarket's NFL teams by full name (same names as ESPN), e.g. "Baltimore Ravens" -> { abbreviation: "bal", alias: "Ravens" }
+let polymarketTeams;
+function fetchPolymarketTeams() {
+    polymarketTeams ??= fetch('https://gamma-api.polymarket.com/teams?league=nfl&limit=100')
+        .then(response => response.json())
+        .then(teams => new Map(teams.map(team => [team.name, team])))
+        .catch(error => {
+            polymarketTeams = undefined; // retry on the next call
+            throw error;
+        });
+    return polymarketTeams;
+}
+
+// Polymarket names game events nfl-<away>-<home>-<UTC kickoff date>; neutral-site games may list the teams the other way round
+async function fetchPolymarketEvent(home, away, kickoff) {
+    const teams = await fetchPolymarketTeams();
+    const homeCode = teams.get(home)?.abbreviation;
+    const awayCode = teams.get(away)?.abbreviation;
+    if (!homeCode || !awayCode) return null;
+    const date = new Date(kickoff).toISOString().slice(0, 10);
+
+    for (const slug of [`nfl-${awayCode}-${homeCode}-${date}`, `nfl-${homeCode}-${awayCode}-${date}`]) {
+        const response = await fetch(`https://gamma-api.polymarket.com/events?slug=${slug}`);
+        const events = response.ok ? await response.json() : [];
+        if (events?.[0]) return events[0];
+    }
+    return null;
+}
+
+/**
+ * The open moneyline and spread markets for a game, with current prices by full team name:
+ * { moneyline: { [team]: price } | null, spreads: [{ favourite, line, prices: { [team]: price } }] }
+ * Spreads are named after the favourite, e.g. { favourite: "Pittsburgh Steelers", line: -2.5 } is Steelers -2.5 / Browns +2.5.
+ */
+export async function fetchPolymarketLines({ home, away, kickoff }) {
+    const [teams, event] = await Promise.all([fetchPolymarketTeams(), fetchPolymarketEvent(home, away, kickoff)]);
+    if (!event) return null;
+    const fullName = new Map([home, away].map(name => [teams.get(name)?.alias, name]));
+
+    const prices = (market) => {
+        const outcomes = JSON.parse(market.outcomes ?? '[]');
+        const outcomePrices = JSON.parse(market.outcomePrices ?? '[]').map(Number);
+        return Object.fromEntries(outcomes.map((alias, index) => [fullName.get(alias), outcomePrices[index]]));
+    };
+    const open = (event.markets ?? []).filter(market => market.closed !== true);
+
+    const moneyline = open.find(market => market.sportsMarketType === 'moneyline');
+    const spreads = open
+        .filter(market => market.sportsMarketType === 'spreads' && typeof market.line === 'number')
+        .map(market => {
+            const favouriteAlias = market.question?.match(/^Spread: (.+) \(/)?.[1];
+            return { favourite: fullName.get(favouriteAlias), line: market.line, prices: prices(market) };
+        })
+        .filter(spread => spread.favourite);
+
+    return { moneyline: moneyline ? prices(moneyline) : null, spreads };
+}
+
+// Last traded price of a Polymarket outcome at a given time, falling back to the first trade after it
+async function fetchPolymarketPrice(tokenId, at, kickoff) {
+    const end = Math.floor(Date.parse(kickoff) / 1000);
+    const target = Math.min(Math.floor(Date.parse(at) / 1000), end);
+    const params = new URLSearchParams({ market: tokenId, startTs: target - 7 * 86400, endTs: end, fidelity: 60 });
+    const response = await fetch(`https://clob.polymarket.com/prices-history?${params}`);
+    if (!response.ok) return null;
+    const history = await response.json().then(data => data?.history ?? []);
+    const before = history.filter(point => point.t <= target);
+    const point = before[before.length - 1] ?? history[0];
+    return point?.p > 0 ? point.p : null;
+}
+
+/**
+ * Polymarket price of a bet at a given time, as decimal odds (1 / price).
+ * A straight bet (ats null) is the team's side of the moneyline market. A spread bet is the team's side of
+ * the spread market named after the favourite: Colts +6.5 is "Spread: Ravens (-6.5)", Ravens -6.5 the same market.
+ */
+export async function fetchPolymarketOdds({ home, away, kickoff, team, ats, at }) {
+    const teams = await fetchPolymarketTeams();
+    const event = await fetchPolymarketEvent(home, away, kickoff);
+    const alias = teams.get(team)?.alias;
+    const otherAlias = teams.get(team === home ? away : home)?.alias;
+    if (!event || !alias || !otherAlias) return null;
+
+    const favourite = ats !== null && ats < 0 ? alias : otherAlias;
+    const market = (event.markets ?? []).find(candidate => {
+        if (ats === null) return candidate.sportsMarketType === 'moneyline';
+        return candidate.sportsMarketType === 'spreads'
+            && candidate.line === -Math.abs(ats)
+            && candidate.question?.startsWith(`Spread: ${favourite} (`);
+    });
+    if (!market) return null;
+
+    const outcomes = JSON.parse(market.outcomes ?? '[]');
+    const tokenIds = JSON.parse(market.clobTokenIds ?? '[]');
+    const tokenId = tokenIds[outcomes.indexOf(alias)];
+    if (!tokenId) return null;
+
+    const price = await fetchPolymarketPrice(tokenId, at, kickoff);
+    return price === null ? null : { odds: Math.round(1000 / price) / 1000, price, market: market.slug };
+}
+
 // Final scores for one week's finished games, keyed by game id: { [gameId]: { [teamName]: score } }
 export async function fetchFinalScores({ season, seasonType, week }) {
     const params = new URLSearchParams({ dates: season, seasontype: seasonType, week });
