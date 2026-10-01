@@ -22,11 +22,34 @@ import {
 } from "@mui/material";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error
-import {fetchNflTeamData} from "./fetch.js";
-import {ppsCalculate, sendMailNotification, type Team} from "./utils.ts";
+import {fetchNflTeamData, fetchUpcomingMatchups} from "./fetch.js";
+import {ppsCalculate, sendMailNotification, type Matchup, type Team} from "./utils.ts";
 
 type IState = {
   teams: Team[],
+  matchups: Matchup[],
+};
+
+function formatKickoff(date: string) {
+  return new Date(date).toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatSpread(spread: number) {
+  if (spread === 0) return "PK";
+  return spread > 0 ? `+${spread}` : String(spread);
+}
+
+const CARD_GRID_SX = {
+  width: '100%',
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+  gap: 2,
 };
 
 // ATS spreads move in half-point increments, e.g. -3.5, +7, 0
@@ -47,6 +70,7 @@ function stepAts(value: string | undefined, direction: 1 | -1) {
 function App() {
   const [state, setState] = useState<IState>({
     teams: [],
+    matchups: [],
   });
   const [updateClicked, setUpdateClicked] = useState(false);
   const [teamBets, setTeamBets] = useState([] as string[]);
@@ -58,10 +82,15 @@ function App() {
   async function onClickUpdate() {
     setUpdateClicked(true);
     try {
-      const teams: Team[] = await fetchNflTeamData();
+      const [teams, matchups]: [Team[], Matchup[]] = await Promise.all([
+        fetchNflTeamData(),
+        // Without matchups the bets view falls back to an ungrouped list, so don't fail the whole load
+        fetchUpcomingMatchups().catch(() => []),
+      ]);
       // Replace rather than append, so refreshing (or a double load in StrictMode) never duplicates teams
       setState({
         teams: teams.map(team => ({...team, pps: ppsCalculate(team.wins, team.losses, team.ties, team.pd, team.pf, team.pa)})),
+        matchups,
       });
     } finally {
       setUpdateClicked(false);
@@ -69,9 +98,9 @@ function App() {
   }
 
   async function onClickCard(teamName: string) {
-    const ats = atsInputs[teamName]?.trim();
+    const ats = atsValue(teamName).trim();
     // An ATS of 0 (or none) means a straight bet on the team, so only the name is stored
-    const hasSpread = ats !== undefined && ats !== "" && Number(ats) !== 0;
+    const hasSpread = ats !== "" && Number(ats) !== 0;
     setTeamBets([...teamBets, hasSpread ? teamName + " " + ats : teamName]);
   }
 
@@ -92,6 +121,124 @@ function App() {
 
   const rankedTeams = [...state.teams].sort((a, b) => b.pps - a.pps);
   const betCount = new Set(teamBets).size;
+
+  const rankByName = new Map(rankedTeams.map((team, index) => [team.name, index + 1]));
+  const teamByName = new Map(rankedTeams.map(team => [team.name, team]));
+  const games = state.matchups.flatMap(matchup => {
+    const home = teamByName.get(matchup.home);
+    const away = teamByName.get(matchup.away);
+    return home && away ? [{...matchup, homeTeam: home, awayTeam: away}] : [];
+  });
+  const teamsInGames = new Set(games.flatMap(game => [game.home, game.away]));
+  const teamsWithoutGame = rankedTeams.filter(team => !teamsInGames.has(team.name));
+
+  // Each team's line from the sportsbook, used as the ATS value until the user enters their own
+  const bookSpreadByTeam = new Map<string, number>(games.flatMap(game =>
+      game.homeSpread === null ? [] : [[game.home, game.homeSpread], [game.away, -game.homeSpread]]));
+
+  function atsValue(teamName: string) {
+    if (atsInputs[teamName] !== undefined) return atsInputs[teamName];
+    const bookSpread = bookSpreadByTeam.get(teamName);
+    return bookSpread === undefined ? "" : String(bookSpread);
+  }
+
+  function renderTeamCard(team: Team, spread?: number | null) {
+    const ats = atsValue(team.name);
+    const atsError = ats !== "" && !isValidAts(ats);
+    const betPlaced = hasBet(team.name);
+    return (
+        <Card
+            key={team.name}
+            elevation={0}
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              bgcolor: 'var(--code-bg)',
+              boxShadow: 'var(--shadow)',
+              border: 2,
+              borderColor: betPlaced ? 'success.main' : 'var(--border)',
+            }}
+        >
+          <CardContent sx={{ flexGrow: 1 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+              <Avatar src={team.logo} alt={team.name} variant="square" sx={{ width: 40, height: 40 }} />
+              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 'bold', lineHeight: 1.2, color: 'var(--text-h)' }}>
+                  {team.name}
+                </Typography>
+                <Typography variant="body2" sx={{ color: 'var(--text)' }}>
+                  #{rankByName.get(team.name)} · {team.wins}-{team.losses}-{team.ties} · {team.pps}
+                </Typography>
+                {spread !== undefined &&
+                    <Typography variant="body2" sx={{ color: 'var(--text-h)', fontWeight: 'bold' }}>
+                      Spread: {spread === null ? "N/A" : formatSpread(spread)}
+                    </Typography>}
+              </Box>
+              {betPlaced && <Chip label="Bet placed" color="success" size="small" />}
+            </Box>
+            <TextField
+                label="ATS"
+                type="number"
+                size="small"
+                fullWidth
+                value={ats}
+                error={atsError}
+                helperText={atsError ? "Use steps of 0.5" : " "}
+                onChange={(e) => setAtsInputs(prev => ({...prev, [team.name]: e.target.value}))}
+                sx={{
+                  // Hide the browser's tiny spinners; the −/+ buttons replace them
+                  '& input[type=number]': { MozAppearance: 'textfield', textAlign: 'center' },
+                  '& input[type=number]::-webkit-inner-spin-button, & input[type=number]::-webkit-outer-spin-button': {
+                    WebkitAppearance: 'none',
+                    margin: 0,
+                  },
+                }}
+                slotProps={{
+                  htmlInput: { step: 0.5, inputMode: 'decimal' },
+                  input: {
+                    startAdornment: (
+                        <InputAdornment position="start">
+                          <IconButton
+                              aria-label={`Decrease ATS for ${team.name}`}
+                              edge="start"
+                              color="primary"
+                              sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
+                              onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(ats, -1)}))}
+                          >
+                            −
+                          </IconButton>
+                        </InputAdornment>
+                    ),
+                    endAdornment: (
+                        <InputAdornment position="end">
+                          <IconButton
+                              aria-label={`Increase ATS for ${team.name}`}
+                              edge="end"
+                              color="primary"
+                              sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
+                              onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(ats, 1)}))}
+                          >
+                            +
+                          </IconButton>
+                        </InputAdornment>
+                    ),
+                  },
+                }}
+            />
+          </CardContent>
+          <CardActions sx={{ px: 2, pb: 2 }}>
+            <Button
+                variant="contained"
+                fullWidth
+                disabled={atsError}
+                onClick={() => onClickCard(team.name)}
+            >
+              Place bet
+            </Button>
+          </CardActions>
+        </Card>
+    );
+  }
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -223,108 +370,76 @@ function App() {
                   </Button>
                 </Stack>
               </Paper>
-            <Box
-                sx={{
-                  width: '100%',
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-                  gap: 2,
-                }}
-            >
-              {rankedTeams.map((team, index) => {
-                const ats = atsInputs[team.name] ?? "";
-                const atsError = ats !== "" && !isValidAts(ats);
-                const betPlaced = hasBet(team.name);
-                return (
-                    <Card
-                        key={team.name}
-                        elevation={0}
+              {games.length === 0 ?
+                  // No schedule available: fall back to all teams, ungrouped
+                  <Box sx={CARD_GRID_SX}>
+                    {rankedTeams.map(team => renderTeamCard(team))}
+                  </Box>
+                  :
+                  <>
+                    <Box
                         sx={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          bgcolor: 'var(--code-bg)',
-                          boxShadow: 'var(--shadow)',
-                          border: 2,
-                          borderColor: betPlaced ? 'success.main' : 'var(--border)',
+                          width: '100%',
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 500px), 1fr))',
+                          gap: 2,
                         }}
                     >
-                      <CardContent sx={{ flexGrow: 1 }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
-                          <Avatar src={team.logo} alt={team.name} variant="square" sx={{ width: 40, height: 40 }} />
-                          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                            <Typography variant="subtitle1" sx={{ fontWeight: 'bold', lineHeight: 1.2, color: 'var(--text-h)' }}>
-                              {team.name}
+                      {games.map(game => (
+                          <Paper
+                              key={game.id}
+                              elevation={0}
+                              sx={{ p: 2, bgcolor: 'var(--bg)', border: 1, borderColor: 'var(--border)' }}
+                          >
+                            <Typography variant="body2" sx={{ color: 'var(--text)', mb: 1.5 }}>
+                              {formatKickoff(game.date)} · {game.neutralSite
+                                  ? `Neutral site${game.venueCity ? ` (${game.venueCity})` : ""}`
+                                  : `at ${game.home}`}
+                              {game.oddsProvider && ` · Odds: ${game.oddsProvider}`}
                             </Typography>
-                            <Typography variant="body2" sx={{ color: 'var(--text)' }}>
-                              #{index + 1} · {team.wins}-{team.losses}-{team.ties} · {team.pps}
-                            </Typography>
+                            <Box
+                                sx={{
+                                  display: 'grid',
+                                  gridTemplateColumns: { xs: '1fr', sm: '1fr auto 1fr' },
+                                  alignItems: 'stretch',
+                                  gap: 1.5,
+                                }}
+                            >
+                              {renderTeamCard(game.awayTeam, game.homeSpread === null ? null : -game.homeSpread)}
+                              <Box
+                                  aria-label="versus"
+                                  sx={{
+                                    alignSelf: 'center',
+                                    justifySelf: 'center',
+                                    width: 40,
+                                    height: 40,
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    bgcolor: 'primary.main',
+                                    color: 'primary.contrastText',
+                                    fontWeight: 'bold',
+                                    fontSize: '0.875rem',
+                                  }}
+                              >
+                                VS
+                              </Box>
+                              {renderTeamCard(game.homeTeam, game.homeSpread)}
+                            </Box>
+                          </Paper>
+                      ))}
+                    </Box>
+                    {teamsWithoutGame.length > 0 &&
+                        <>
+                          <Typography variant="h6" sx={{ color: 'var(--text-h)', mt: 2 }}>
+                            No upcoming game this week
+                          </Typography>
+                          <Box sx={CARD_GRID_SX}>
+                            {teamsWithoutGame.map(team => renderTeamCard(team))}
                           </Box>
-                          {betPlaced && <Chip label="Bet placed" color="success" size="small" />}
-                        </Box>
-                        <TextField
-                            label="ATS"
-                            type="number"
-                            size="small"
-                            fullWidth
-                            value={ats}
-                            error={atsError}
-                            helperText={atsError ? "Use steps of 0.5" : " "}
-                            onChange={(e) => setAtsInputs(prev => ({...prev, [team.name]: e.target.value}))}
-                            sx={{
-                              // Hide the browser's tiny spinners; the −/+ buttons replace them
-                              '& input[type=number]': { MozAppearance: 'textfield', textAlign: 'center' },
-                              '& input[type=number]::-webkit-inner-spin-button, & input[type=number]::-webkit-outer-spin-button': {
-                                WebkitAppearance: 'none',
-                                margin: 0,
-                              },
-                            }}
-                            slotProps={{
-                              htmlInput: { step: 0.5, inputMode: 'decimal' },
-                              input: {
-                                startAdornment: (
-                                    <InputAdornment position="start">
-                                      <IconButton
-                                          aria-label={`Decrease ATS for ${team.name}`}
-                                          edge="start"
-                                          color="primary"
-                                          sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
-                                          onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(prev[team.name], -1)}))}
-                                      >
-                                        −
-                                      </IconButton>
-                                    </InputAdornment>
-                                ),
-                                endAdornment: (
-                                    <InputAdornment position="end">
-                                      <IconButton
-                                          aria-label={`Increase ATS for ${team.name}`}
-                                          edge="end"
-                                          color="primary"
-                                          sx={{ fontSize: '1.5rem', fontWeight: 'bold', width: 40, height: 40 }}
-                                          onClick={() => setAtsInputs(prev => ({...prev, [team.name]: stepAts(prev[team.name], 1)}))}
-                                      >
-                                        +
-                                      </IconButton>
-                                    </InputAdornment>
-                                ),
-                              },
-                            }}
-                        />
-                      </CardContent>
-                      <CardActions sx={{ px: 2, pb: 2 }}>
-                        <Button
-                            variant="contained"
-                            fullWidth
-                            disabled={atsError}
-                            onClick={() => onClickCard(team.name)}
-                        >
-                          Place bet
-                        </Button>
-                      </CardActions>
-                    </Card>
-                );
-              })}
-            </Box>
+                        </>}
+                  </>}
             </Box>}
         <Snackbar
             open={notificationOpen}
